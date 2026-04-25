@@ -2,12 +2,16 @@ name: Triple ST Daily Scan
 
 on:
   schedule:
-    - cron: '30 21 * * 1-5'   # 週一~五 21:30 UTC = 台灣時間 05:30 (收盤後)
+    # 掃描時間：週一~五
+    # 21:30 UTC = 美東 17:30 (美股收盤後) = 台灣 05:30 (隔日)
+    # 台股 13:30 TWN 收盤 = 05:30 UTC，美股與台股均已收盤
+    - cron: '30 21 * * 1-5'
   workflow_dispatch:            # 允許手動觸發
 
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 120        # 1y資料+新指標約需 50-60 分鐘
     permissions:
       contents: write
 

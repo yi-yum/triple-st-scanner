@@ -288,6 +288,67 @@ def calc_supertrend(high: np.ndarray, low: np.ndarray,
     return direction
 
 
+# ── 2b. RSI / ADX ─────────────────────────────────────────────
+def calc_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Wilder's RSI，回傳長度同 close 的陣列，前 period 根為 nan"""
+    n = len(close)
+    rsi = np.full(n, np.nan)
+    if n < period + 2:
+        return rsi
+    delta = np.diff(close.astype(float))
+    avg_g = np.where(delta[:period] > 0, delta[:period], 0.0).mean()
+    avg_l = np.where(delta[:period] < 0, -delta[:period], 0.0).mean()
+    for i in range(period, len(delta)):
+        g = delta[i] if delta[i] > 0 else 0.0
+        l = -delta[i] if delta[i] < 0 else 0.0
+        avg_g = (avg_g * (period - 1) + g) / period
+        avg_l = (avg_l * (period - 1) + l) / period
+        rs = avg_g / avg_l if avg_l > 1e-10 else 100.0
+        rsi[i + 1] = 100.0 - 100.0 / (1.0 + rs)
+    return rsi
+
+
+def calc_adx(high: np.ndarray, low: np.ndarray,
+             close: np.ndarray, period: int = 14) -> np.ndarray:
+    """Wilder's ADX，回傳長度同 close 的陣列"""
+    n = len(close)
+    adx = np.full(n, np.nan)
+    if n < period * 2 + 2:
+        return adx
+    h, l, c = high.astype(float), low.astype(float), close.astype(float)
+    pc = np.empty(n); pc[0] = c[0]; pc[1:] = c[:-1]
+    tr  = np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
+    up  = np.concatenate([[0.0], h[1:] - h[:-1]])
+    dn  = np.concatenate([[0.0], l[:-1] - l[1:]])
+    pdm = np.where((up > dn) & (up > 0), up, 0.0)
+    ndm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    # 初始 Wilder 平滑值
+    atr_w = tr[1:period + 1].mean()
+    pdm_w = pdm[1:period + 1].mean()
+    ndm_w = ndm[1:period + 1].mean()
+    dx_list: list = []
+    for i in range(period, n):
+        atr_w = (atr_w * (period - 1) + tr[i])  / period
+        pdm_w = (pdm_w * (period - 1) + pdm[i]) / period
+        ndm_w = (ndm_w * (period - 1) + ndm[i]) / period
+        pdi = 100.0 * pdm_w / atr_w if atr_w > 1e-10 else 0.0
+        ndi = 100.0 * ndm_w / atr_w if atr_w > 1e-10 else 0.0
+        s = pdi + ndi
+        dx_list.append(100.0 * abs(pdi - ndi) / s if s > 1e-10 else 0.0)
+    if len(dx_list) < period:
+        return adx
+    adx_val = float(np.mean(dx_list[:period]))
+    base_idx = period * 2
+    if base_idx < n:
+        adx[base_idx] = adx_val
+    for j in range(period, len(dx_list)):
+        adx_val = (adx_val * (period - 1) + dx_list[j]) / period
+        idx = j + period + 1
+        if idx < n:
+            adx[idx] = adx_val
+    return adx
+
+
 # ── 3. 分析單一股票 ────────────────────────────────────────────
 def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
                    min_price: float = MIN_PRICE_US,
@@ -361,6 +422,42 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
         prev_close = float(close[-2]) if len(close) >= 2 else cur_price
         chg_pct    = round((cur_price - prev_close) / prev_close * 100, 2)
 
+        # ── 新增技術指標 ──
+        rsi_arr = calc_rsi(close)
+        adx_arr = calc_adx(high, low, close)
+
+        cur_rsi = float(rsi_arr[-1]) if not np.isnan(rsi_arr[-1]) else None
+        cur_adx = float(adx_arr[-1]) if not np.isnan(adx_arr[-1]) else None
+
+        # ATR%(14) = Wilder ATR / 現價 × 100
+        pc_ = np.empty(len(close)); pc_[0] = close[0]; pc_[1:] = close[:-1]
+        tr_ = np.maximum(high-low, np.maximum(np.abs(high-pc_), np.abs(low-pc_)))
+        atr14 = np.zeros(len(close))
+        if len(close) >= 14:
+            atr14[13] = tr_[:14].mean()
+            for _i in range(14, len(close)):
+                atr14[_i] = (atr14[_i-1]*13 + tr_[_i]) / 14
+        atr_pct = round(atr14[-1]/cur_price*100, 2) if cur_price > 0 and atr14[-1] > 0 else None
+
+        # 量比 = 今日量 / 20日均量
+        vol_ratio = round(float(vol[-1]/avg_vol), 2) if avg_vol > 0 else None
+
+        # 多日報酬率
+        ret_5d  = round((cur_price-float(close[-6]))/float(close[-6])*100, 2)  if len(close)>=6  else None
+        ret_20d = round((cur_price-float(close[-21]))/float(close[-21])*100, 2) if len(close)>=21 else None
+
+        # 距52週高點%
+        high_52 = float(np.max(high[-252:])) if len(high) >= 20 else float(np.max(high))
+        pct_from_52w = round((cur_price - high_52) / high_52 * 100, 2)
+
+        # 持倉天數
+        days_in_trade = None
+        if entry_date:
+            try:
+                days_in_trade = (datetime.now() - datetime.strptime(entry_date, '%Y-%m-%d')).days
+            except Exception:
+                pass
+
         return {
             'ticker':               ticker,
             'market':               market,
@@ -379,6 +476,28 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
             'entry_date':           entry_date,
             'pnl_pct':              pnl_pct,
             'stop_loss':            stop_loss,
+            # 新欄位
+            'rsi':            round(cur_rsi, 1) if cur_rsi is not None else None,
+            'adx':            round(cur_adx, 1) if cur_adx is not None else None,
+            'atr_pct':        atr_pct,
+            'vol_ratio':      vol_ratio,
+            'ret_5d':         ret_5d,
+            'ret_20d':        ret_20d,
+            'pct_from_52w':   pct_from_52w,
+            'high_52w':       round(high_52, 2),
+            'days_in_trade':  days_in_trade,
+            'rs_20d':         None,   # 由 main() 補入
+            # 台股籌碼面（由 main() 補入，US 為 None）
+            'foreign_net':    None,
+            'trust_net':      None,
+            'dealer_net':     None,
+            'inst_total':     None,
+            'inst_buy':       False,
+            'inst_sell':      False,
+            'margin_bal':     None,
+            'short_bal':      None,
+            'margin_chg':     None,
+            'short_chg':      None,
         }
     except Exception:
         return None
@@ -391,7 +510,7 @@ def _bulk_download_chunk(tickers: list, label: str = '') -> dict:
         return {}
     try:
         data = yf.download(
-            tickers, period='6mo', interval='1d',
+            tickers, period='1y', interval='1d',
             group_by='ticker', auto_adjust=True,
             progress=False, threads=False
         )
@@ -448,6 +567,215 @@ def bulk_download_all(us_tickers: list, tw_tickers: list) -> dict:
             print(f'got {len(r)}')
 
     print(f'  Total downloaded: {len(result)} tickers')
+    return result
+
+
+def download_benchmarks() -> dict:
+    """下載 SPY (美股基準) 與 ^TWII (台股基準)，計算近期報酬率"""
+    bench = {}
+    for sym, mkt in [('SPY', 'US'), ('^TWII', 'TW')]:
+        try:
+            df = yf.download(sym, period='1y', interval='1d',
+                             auto_adjust=True, progress=False)
+            if df is None or df.empty:
+                continue
+            c = df['Close'].values.astype(float)
+            bench[mkt] = {
+                'ret_5d':  round((c[-1]-c[-6]) /c[-6] *100, 2) if len(c)>=6  else None,
+                'ret_20d': round((c[-1]-c[-21])/c[-21]*100, 2) if len(c)>=21 else None,
+            }
+            print(f'  [Benchmark] {sym}: 5d={bench[mkt]["ret_5d"]}%  20d={bench[mkt]["ret_20d"]}%')
+        except Exception as e:
+            print(f'  [WARN] Benchmark {sym}: {e}')
+    return bench
+
+
+# ── 台股籌碼面資料 ────────────────────────────────────────────
+
+def _chip_date() -> str:
+    """取得最新交易日字串 YYYYMMDD，週末退回上週五"""
+    from datetime import timedelta
+    d = datetime.now()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime('%Y%m%d')
+
+
+def _chip_int(v) -> int | None:
+    """移除千分位逗號後轉整數，失敗回 None"""
+    try:
+        return int(str(v).replace(',', '').replace('+', '').strip())
+    except Exception:
+        return None
+
+
+def fetch_chip_institutional() -> dict:
+    """
+    三大法人買賣超（上市 T86 + 上櫃 OpenAPI）
+    回傳 {stock_code: {foreign_net, trust_net, dealer_net, inst_total, inst_buy, inst_sell}}
+    單位：張 (已除以 1000)
+    """
+    result = {}
+    date_str = _chip_date()
+
+    # ─ 上市 TWSE T86 ─
+    try:
+        url = (f'https://www.twse.com.tw/rwd/zh/fund/T86'
+               f'?date={date_str}&selectType=ALL&response=json')
+        resp = requests.get(url, headers=_HEADERS, timeout=30)
+        resp.raise_for_status()
+        jd     = resp.json()
+        fields = jd.get('fields', [])
+        rows   = jd.get('data',   [])
+
+        if fields and rows:
+            def _fi(kw):
+                for i, f in enumerate(fields):
+                    if kw in f:
+                        return i
+                return -1
+
+            fi_code    = _fi('代號')
+            fi_foreign = _fi('外資及陸資買賣超')
+            fi_trust   = _fi('投信買賣超')
+            fi_dealer  = max(
+                [i for i, f in enumerate(fields) if '自營商買賣超' in f],
+                default=_fi('自營商買賣超')
+            )
+            fi_inst = _fi('三大法人買賣超')
+
+            # fallback 位置（T86 欄位順序通常固定）
+            if fi_code    < 0: fi_code    = 0
+            if fi_foreign < 0: fi_foreign = 8
+            if fi_trust   < 0: fi_trust   = 11
+            if fi_dealer  < 0: fi_dealer  = 14
+            if fi_inst    < 0: fi_inst    = 15
+
+            for row in rows:
+                code = str(row[fi_code]).strip()
+                if not code.isdigit() or len(code) != 4:
+                    continue
+                fn = _chip_int(row[fi_foreign]) if fi_foreign < len(row) else None
+                tn = _chip_int(row[fi_trust])   if fi_trust   < len(row) else None
+                dn = _chip_int(row[fi_dealer])  if fi_dealer  < len(row) else None
+                it = _chip_int(row[fi_inst])    if fi_inst    < len(row) else None
+                result[code] = {
+                    'foreign_net': fn // 1000 if fn is not None else None,
+                    'trust_net':   tn // 1000 if tn is not None else None,
+                    'dealer_net':  dn // 1000 if dn is not None else None,
+                    'inst_total':  it // 1000 if it is not None else None,
+                }
+        print(f'  [Chip] TWSE T86: {len(result)} stocks  (date={date_str})')
+    except Exception as e:
+        print(f'  [WARN] TWSE T86: {e}')
+
+    # ─ 上櫃 TPEx OpenAPI ─
+    try:
+        url  = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_institution_trade'
+        resp = requests.get(url, headers=_HEADERS, timeout=30)
+        resp.raise_for_status()
+        tpex_cnt = 0
+        for item in resp.json():
+            code = str(item.get('SecuritiesCompanyCode', '')).strip()
+            if not code.isdigit() or len(code) != 4:
+                continue
+            fb = _chip_int(item.get('ForeignInvestorBuy',  0)) or 0
+            fs = _chip_int(item.get('ForeignInvestorSell', 0)) or 0
+            tb = _chip_int(item.get('InvestmentTrustBuy',  0)) or 0
+            ts = _chip_int(item.get('InvestmentTrustSell', 0)) or 0
+            db = _chip_int(item.get('DealerBuy',  0)) or 0
+            ds = _chip_int(item.get('DealerSell', 0)) or 0
+            fn, tn, dn = fb - fs, tb - ts, db - ds
+            result[code] = {
+                'foreign_net': fn // 1000,
+                'trust_net':   tn // 1000,
+                'dealer_net':  dn // 1000,
+                'inst_total':  (fn + tn + dn) // 1000,
+            }
+            tpex_cnt += 1
+        print(f'  [Chip] TPEx Institution: {tpex_cnt} stocks')
+    except Exception as e:
+        print(f'  [WARN] TPEx Institution: {e}')
+
+    # 衍生：外資+投信同向訊號
+    for d in result.values():
+        fn = d.get('foreign_net') or 0
+        tn = d.get('trust_net')   or 0
+        d['inst_buy']  = bool(fn > 0 and tn > 0)
+        d['inst_sell'] = bool(fn < 0 and tn < 0)
+
+    return result
+
+
+def fetch_chip_margin() -> dict:
+    """
+    融資融券餘額（上市 MI_MARGN + 上櫃 OpenAPI）
+    回傳 {stock_code: {margin_bal, short_bal, margin_chg, short_chg}}
+    單位：張
+    """
+    result   = {}
+    date_str = _chip_date()
+
+    # ─ 上市 TWSE MI_MARGN ─
+    try:
+        url = (f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN'
+               f'?date={date_str}&selectType=ALL&response=json')
+        resp = requests.get(url, headers=_HEADERS, timeout=30)
+        resp.raise_for_status()
+        jd   = resp.json()
+        rows = jd.get('data', [])
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                if not code.isdigit() or len(code) != 4:
+                    continue
+                # 欄位位置(固定): 0=代號 2=融資買進 3=融資賣出 5=融資餘額
+                #                 7=融券賣出 8=融券買進 10=融券餘額
+                mb  = _chip_int(row[2])
+                ms  = _chip_int(row[3])
+                mbl = _chip_int(row[5])
+                ss  = _chip_int(row[7])
+                sb  = _chip_int(row[8])
+                sbl = _chip_int(row[10])
+                result[code] = {
+                    'margin_bal': mbl,
+                    'short_bal':  sbl,
+                    'margin_chg': (mb - ms) if mb is not None and ms is not None else None,
+                    'short_chg':  (ss - sb) if ss is not None and sb is not None else None,
+                }
+            except (IndexError, Exception):
+                continue
+        print(f'  [Chip] TWSE MI_MARGN: {len(result)} stocks')
+    except Exception as e:
+        print(f'  [WARN] TWSE MI_MARGN: {e}')
+
+    # ─ 上櫃 TPEx OpenAPI ─
+    try:
+        url  = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_trades'
+        resp = requests.get(url, headers=_HEADERS, timeout=30)
+        resp.raise_for_status()
+        tpex_cnt = 0
+        for item in resp.json():
+            code = str(item.get('SecuritiesCompanyCode', '')).strip()
+            if not code.isdigit() or len(code) != 4:
+                continue
+            mb  = _chip_int(item.get('MarginPurchaseBuy',     0)) or 0
+            ms  = _chip_int(item.get('MarginPurchaseSell',    0)) or 0
+            mbl = _chip_int(item.get('MarginPurchaseBalance', None))
+            ss  = _chip_int(item.get('ShortSaleSell',         0)) or 0
+            sb  = _chip_int(item.get('ShortSaleBuy',          0)) or 0
+            sbl = _chip_int(item.get('ShortSaleBalance',      None))
+            result[code] = {
+                'margin_bal': mbl,
+                'short_bal':  sbl,
+                'margin_chg': mb - ms,
+                'short_chg':  ss - sb,
+            }
+            tpex_cnt += 1
+        print(f'  [Chip] TPEx Margin: {tpex_cnt} stocks')
+    except Exception as e:
+        print(f'  [WARN] TPEx Margin: {e}')
+
     return result
 
 
@@ -515,6 +843,7 @@ def generate_html(results: list, scan_time: str, ticker_meta: dict) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Triple ST Scanner · __SCAN_TIME__</title>
 <style>
+/* ── new indicator color classes ── */
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Noto+Sans+TC:wght@400;700&display=swap');
 :root{
   --bg:#080c14;--bg2:#0d1420;--bg3:#111d2e;
@@ -638,6 +967,31 @@ tbody tr.row-today-r{background:rgba(255,85,102,.08);border-left:3px solid var(-
   text-align:right;padding:8px 14px;border-top:1px solid var(--border);background:var(--bg2)}
 .disclaimer{font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;
   padding:16px;margin-top:8px;border-top:1px solid var(--border);line-height:1.7}
+/* RSI */
+.rsi-hot    {color:#ff5566;font-weight:700}
+.rsi-good   {color:#00d4aa;font-weight:700}
+.rsi-neutral{color:#f5c842}
+.rsi-cold   {color:#4a9eff}
+.rsi-na     {color:var(--muted)}
+/* ADX */
+.adx-strong {color:#00d4aa;font-weight:700}
+.adx-mid    {color:#f5c842}
+.adx-weak   {color:var(--muted)}
+/* 量比 / RS / 52w */
+.vr-hot{color:#00d4aa;font-weight:700}.vr-ok{color:#a3e4d7}.vr-low{color:var(--muted)}
+.rs-pos{color:#00d4aa;font-weight:600}.rs-neg{color:#ff5566;font-weight:600}.rs-na{color:var(--muted)}
+.w52-near{color:#f5c842}.w52-far{color:var(--muted)}
+.ind2{font-size:10px;display:block;margin-top:2px}
+/* 籌碼面 */
+.chip-buy {color:#00d4aa;font-weight:700}
+.chip-sell{color:#ff5566;font-weight:700}
+.chip-neu {color:var(--muted)}
+.chip-na  {color:var(--border2)}
+.badge-inst-buy {font-family:var(--mono);font-size:8px;padding:1px 5px;border-radius:3px;
+  background:rgba(0,212,170,.15);color:var(--green);border:1px solid rgba(0,212,170,.4)}
+.badge-inst-sell{font-family:var(--mono);font-size:8px;padding:1px 5px;border-radius:3px;
+  background:rgba(255,85,102,.15);color:var(--red);border:1px solid rgba(255,85,102,.4)}
+table{min-width:1380px}
 </style>
 </head>
 <body>
@@ -668,6 +1022,21 @@ tbody tr.row-today-r{background:rgba(255,85,102,.08);border-left:3px solid var(-
   <button class="fbtn"        id="btnTodayG"   onclick="setFilter('today_green',this)">✨ 今日轉全綠</button>
   <button class="fbtn"        id="btnTodayR"   onclick="setFilter('today_red',this)">⚡ 今日轉紅</button>
   <div class="ctrl-sep"></div>
+  <span class="ctrl-label">RSI</span>
+  <button class="fbtn active" id="btnRsiAll"  onclick="setRsi('all',this)">全部</button>
+  <button class="fbtn"        id="btnRsiHot"  onclick="setRsi('hot',this)">🔴 &gt;70 超買</button>
+  <button class="fbtn"        id="btnRsiGood" onclick="setRsi('good',this)">🟢 50-70 甜蜜</button>
+  <button class="fbtn"        id="btnRsiWeak" onclick="setRsi('weak',this)">🔵 &lt;50 弱</button>
+  <div class="ctrl-sep"></div>
+  <span class="ctrl-label">ADX</span>
+  <button class="fbtn active" id="btnAdxAll"    onclick="setAdx('all',this)">全部</button>
+  <button class="fbtn"        id="btnAdxStrong" onclick="setAdx('strong',this)">⚡ &gt;25 強趨勢</button>
+  <div class="ctrl-sep"></div>
+  <span class="ctrl-label">籌碼</span>
+  <button class="fbtn active" id="btnChipAll"  onclick="setChip('all',this)">全部</button>
+  <button class="fbtn"        id="btnChipBuy"  onclick="setChip('buy',this)">🟢 外資+投信同買</button>
+  <button class="fbtn"        id="btnChipSell" onclick="setChip('sell',this)">🔴 外資+投信同賣</button>
+  <div class="ctrl-sep"></div>
   <span class="ctrl-label">產業</span>
   <select id="sectorSel" onchange="applyFilters()">
     <option value="">全部產業</option>
@@ -682,15 +1051,20 @@ tbody tr.row-today-r{background:rgba(255,85,102,.08);border-left:3px solid var(-
       <tr>
         <th class="sortable" onclick="sortBy('ticker',this)">代號</th>
         <th>名稱</th>
-        <th class="sortable" onclick="sortBy('price',this)">現價</th>
-        <th class="sortable" onclick="sortBy('change_pct',this)">1日漲跌</th>
-        <th>ST 狀態</th>
+        <th class="sortable" onclick="sortBy('price',this)">現價 / 1d%</th>
+        <th>ST</th>
         <th class="sortable" onclick="sortBy('_statusRank',this)">訊號</th>
         <th class="sortable" onclick="sortBy('_todayRank',this)">今日轉燈</th>
-        <th class="sortable" onclick="sortBy('entry_price',this)">進場價</th>
+        <th class="sortable" onclick="sortBy('rsi',this)">RSI / ADX</th>
+        <th class="sortable" onclick="sortBy('vol_ratio',this)">量比 / ATR%</th>
+        <th class="sortable" onclick="sortBy('ret_5d',this)">5d% / 20d%</th>
+        <th class="sortable" onclick="sortBy('rs_20d',this)">超額報酬</th>
+        <th class="sortable" onclick="sortBy('pct_from_52w',this)">距52週高</th>
+        <th class="sortable" onclick="sortBy('inst_total',this)">法人籌碼 <span style="color:var(--tw-color);font-size:8px">TW</span></th>
+        <th class="sortable" onclick="sortBy('margin_bal',this)">融資/券 <span style="color:var(--tw-color);font-size:8px">TW</span></th>
+        <th class="sortable" onclick="sortBy('entry_price',this)">進場 / 持倉</th>
         <th class="sortable" onclick="sortBy('pnl_pct',this)">模擬損益</th>
-        <th class="sortable" onclick="sortBy('avg_vol_m',this)">均量(M)</th>
-        <th class="sortable" onclick="sortBy('sector',this)">產業/類別</th>
+        <th class="sortable" onclick="sortBy('avg_vol_m',this)">均量/產業</th>
       </tr>
     </thead>
     <tbody id="tbody"></tbody>
@@ -725,6 +1099,9 @@ sectors.forEach(s => {
 // ── State ───────────────────────────────────────────────────
 let curMkt     = 'all';
 let curFilter  = 'all';
+let curRsi     = 'all';
+let curAdx     = 'all';
+let curChip    = 'all';
 let sortKey    = 'pnl_pct';
 let sortAsc    = false;
 let displayed  = [...RAW];
@@ -750,6 +1127,35 @@ function setFilter(f, btn) {
   applyFilters();
 }
 
+function setRsi(v, btn) {
+  curRsi = v;
+  document.querySelectorAll('[id^=btnRsi]').forEach(b =>
+    b.classList.remove('active','active-r','active-p'));
+  if (v==='hot') btn.classList.add('active-r');
+  else if (v==='good') btn.classList.add('active');
+  else if (v==='weak') btn.classList.add('active-p');
+  else btn.classList.add('active');
+  applyFilters();
+}
+
+function setAdx(v, btn) {
+  curAdx = v;
+  document.querySelectorAll('[id^=btnAdx]').forEach(b =>
+    b.classList.remove('active','active-p'));
+  btn.classList.add(v==='strong' ? 'active-p' : 'active');
+  applyFilters();
+}
+
+function setChip(v, btn) {
+  curChip = v;
+  document.querySelectorAll('[id^=btnChip]').forEach(b =>
+    b.classList.remove('active','active-r','active-p'));
+  if (v==='buy')  btn.classList.add('active');
+  else if (v==='sell') btn.classList.add('active-r');
+  else btn.classList.add('active');
+  applyFilters();
+}
+
 function applyFilters() {
   const sector = document.getElementById('sectorSel').value;
   const q = document.getElementById('searchBox').value.trim().toUpperCase();
@@ -762,6 +1168,15 @@ function applyFilters() {
     if (curFilter === 'partial') {
       if (!(!r.all_green && (r.st1===1||r.st2===1||r.st3===1))) return false;
     }
+    // RSI filter
+    if (curRsi === 'hot'  && !(r.rsi != null && r.rsi > 70))           return false;
+    if (curRsi === 'good' && !(r.rsi != null && r.rsi > 50 && r.rsi <= 70)) return false;
+    if (curRsi === 'weak' && !(r.rsi != null && r.rsi <= 50))           return false;
+    // ADX filter
+    if (curAdx === 'strong' && !(r.adx != null && r.adx > 25))         return false;
+    // Chip filter (TW only)
+    if (curChip === 'buy'  && !r.inst_buy)  return false;
+    if (curChip === 'sell' && !r.inst_sell) return false;
     if (sector && r.sector !== sector) return false;
     if (q && !r.ticker.includes(q) && !(r.name||'').toUpperCase().includes(q)) return false;
     return true;
@@ -804,7 +1219,52 @@ function fmtEntry(r) {
   const p = r.currency === 'TWD'
     ? `NT$${r.entry_price.toFixed(r.entry_price >= 10 ? 1 : 2)}`
     : `$${r.entry_price.toFixed(2)}`;
-  return `<span class="entry-info">${p}<br><span style="font-size:9px">${r.entry_date||''}</span></span>`;
+  const days = r.days_in_trade != null ? `<span style="font-size:9px;color:var(--purple)">${r.days_in_trade}天</span>` : '';
+  return `<span class="entry-info">${p}<br><span style="font-size:9px">${r.entry_date||''}</span> ${days}</span>`;
+}
+function rsiCls(v) {
+  if (v==null) return 'rsi-na';
+  if (v>70) return 'rsi-hot'; if (v>50) return 'rsi-good';
+  if (v>30) return 'rsi-neutral'; return 'rsi-cold';
+}
+function adxCls(v) {
+  if (v==null) return 'adx-weak'; if (v>25) return 'adx-strong'; if (v>15) return 'adx-mid'; return 'adx-weak';
+}
+function fmtRet(v) {
+  if (v==null) return '<span style="color:var(--muted)">—</span>';
+  const c = v>=0?'pos':'neg', s=v>=0?'+':'';
+  return `<span class="chg ${c}">${s}${v.toFixed(1)}%</span>`;
+}
+function fmtRS(v) {
+  if (v==null) return '<span class="rs-na">—</span>';
+  const c=v>=0?'rs-pos':'rs-neg', s=v>=0?'+':'';
+  return `<span class="${c}">${s}${v.toFixed(1)}%</span>`;
+}
+function fmt52w(v) {
+  if (v==null) return '<span style="color:var(--muted)">—</span>';
+  const c = v>-10?'w52-near':'w52-far';
+  return `<span class="${c}">${v.toFixed(1)}%</span>`;
+}
+function fmtChipNet(v, label) {
+  if (v==null) return `<span class="chip-na">—</span>`;
+  const cls = v>0?'chip-buy':v<0?'chip-sell':'chip-neu';
+  const sign = v>0?'+':'';
+  const abs = Math.abs(v) >= 1000
+    ? (v/1000).toFixed(1)+'K'
+    : String(v);
+  return `<span class="${cls}" title="${label}">${sign}${abs}張</span>`;
+}
+function fmtChipBal(v, label) {
+  if (v==null) return `<span class="chip-na">—</span>`;
+  const disp = Math.abs(v) >= 1000 ? (v/1000).toFixed(1)+'K' : String(v);
+  return `<span class="chip-neu" title="${label}">${disp}張</span>`;
+}
+function fmtChipChg(v) {
+  if (v==null) return '';
+  const cls  = v>0?'chip-buy':v<0?'chip-sell':'chip-neu';
+  const sign = v>0?'+':'';
+  const disp = Math.abs(v) >= 1000 ? (v/1000).toFixed(1)+'K' : String(v);
+  return `<span class="${cls}" style="font-size:9px">${sign}${disp}</span>`;
 }
 
 function render() {
@@ -848,11 +1308,14 @@ function render() {
                  : r.stop_loss                    ? 'row-sl'
                  : r.all_green                    ? 'row-green' : '';
 
+    const vrCls = r.vol_ratio==null?'vr-low':r.vol_ratio>=2?'vr-hot':r.vol_ratio>=1?'vr-ok':'vr-low';
     return `<tr class="${rowCls}">
       <td><div style="display:flex;gap:5px;align-items:center">${mktBadge}<span class="tick">${r.ticker}</span></div></td>
-      <td><span class="nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,22)}</span></td>
-      <td><span class="price">${fmtPrice(r)}</span></td>
-      <td><span class="chg ${chgCls}">${chgSign}${r.change_pct.toFixed(2)}%</span></td>
+      <td><span class="nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,20)}</span></td>
+      <td>
+        <span class="price">${fmtPrice(r)}</span>
+        <span class="ind2 chg ${chgCls}">${chgSign}${r.change_pct.toFixed(2)}%</span>
+      </td>
       <td>
         <div class="lights">
           ${dot(r.st1)}<span class="dot-lbl">1</span>
@@ -862,10 +1325,43 @@ function render() {
       </td>
       <td>${badge}</td>
       <td>${todayHtml}</td>
+      <td>
+        <span class="${rsiCls(r.rsi)}">${r.rsi!=null?r.rsi.toFixed(1):'—'}</span>
+        <span class="ind2 ${adxCls(r.adx)}">ADX ${r.adx!=null?r.adx.toFixed(1):'—'}</span>
+      </td>
+      <td>
+        <span class="${vrCls}">${r.vol_ratio!=null?r.vol_ratio.toFixed(2)+'x':'—'}</span>
+        <span class="ind2" style="color:var(--muted)">ATR ${r.atr_pct!=null?r.atr_pct.toFixed(2)+'%':'—'}</span>
+      </td>
+      <td>
+        ${fmtRet(r.ret_5d)}
+        <span class="ind2">${fmtRet(r.ret_20d)}</span>
+      </td>
+      <td>${fmtRS(r.rs_20d)}</td>
+      <td>${fmt52w(r.pct_from_52w)}</td>
+      <td>
+        ${r.market!=='TW' ? '<span class="chip-na">US</span>' : (() => {
+          const instBadge = r.inst_buy
+            ? '<span class="badge-inst-buy">外資+投信同買</span>'
+            : r.inst_sell
+              ? '<span class="badge-inst-sell">外資+投信同賣</span>'
+              : '';
+          return `${fmtChipNet(r.foreign_net,'外資買賣超')}
+                  <span class="ind2">${fmtChipNet(r.trust_net,'投信買賣超')} ${instBadge}</span>`;
+        })()}
+      </td>
+      <td>
+        ${r.market!=='TW' ? '<span class="chip-na">US</span>' : (() => {
+          return `${fmtChipBal(r.margin_bal,'融資餘額')} ${fmtChipChg(r.margin_chg)}
+                  <span class="ind2">${fmtChipBal(r.short_bal,'融券餘額')} ${fmtChipChg(r.short_chg)}</span>`;
+        })()}
+      </td>
       <td>${fmtEntry(r)}</td>
       <td>${pnlHtml}</td>
-      <td><span class="vol">${r.avg_vol_m.toFixed(1)}M</span></td>
-      <td><span class="sec-badge">${(r.sector||'?').substring(0,18)}</span></td>
+      <td>
+        <span class="vol">${r.avg_vol_m.toFixed(1)}M</span>
+        <span class="ind2 sec-badge">${(r.sector||'?').substring(0,16)}</span>
+      </td>
     </tr>`;
   }).join('');
 
@@ -889,6 +1385,12 @@ function renderStats() {
     if (!valid.length) return null;
     return valid.reduce((s, r) => s + r.pnl_pct, 0) / valid.length;
   })();
+  const greenRsi = RAW.filter(r => r.all_green && r.rsi != null);
+  const avgRsi = greenRsi.length ? greenRsi.reduce((s,r)=>s+r.rsi,0)/greenRsi.length : null;
+  const adxStrongCnt  = RAW.filter(r => r.all_green && r.adx!=null && r.adx>25).length;
+  const rsPosCnt      = RAW.filter(r => r.all_green && r.rs_20d!=null && r.rs_20d>0).length;
+  const chipBuyCnt    = RAW.filter(r => r.all_green && r.market==='TW' && r.inst_buy).length;
+  const chipSellCnt   = RAW.filter(r => r.all_green && r.market==='TW' && r.inst_sell).length;
 
   document.getElementById('statsRow').innerHTML = `
     <div class="stat-card">
@@ -929,6 +1431,23 @@ function renderStats() {
       <div class="stat-val ${avgPnl>=0?'g':'r'}">${avgPnl>=0?'+':''}${avgPnl.toFixed(1)}%</div>
       <div class="stat-sub">自進場日起算</div>
     </div>` : ''}
+    ${avgRsi != null ? `
+    <div class="stat-card">
+      <div class="stat-label">全綠平均RSI</div>
+      <div class="stat-val ${avgRsi>70?'r':avgRsi>50?'g':'y'}">${avgRsi.toFixed(0)}</div>
+      <div class="stat-sub">ADX&gt;25強趨勢 ${adxStrongCnt}檔</div>
+    </div>` : ''}
+    <div class="stat-card">
+      <div class="stat-label">超額報酬 &gt;0</div>
+      <div class="stat-val g">${rsPosCnt}</div>
+      <div class="stat-sub">全綠中跑贏大盤</div>
+    </div>
+    <div class="stat-card" style="border-color:rgba(249,115,22,.35);cursor:pointer"
+         onclick="setChip('buy',document.getElementById('btnChipBuy'))">
+      <div class="stat-label">台股外資+投信同買</div>
+      <div class="stat-val tw">${chipBuyCnt}</div>
+      <div class="stat-sub">全綠 · 點擊篩選${chipSellCnt>0?` / 同賣${chipSellCnt}`:''}</div>
+    </div>
   `;
 }
 
@@ -973,6 +1492,9 @@ def main():
     print(f'\n[3/4] Downloading market data...')
     ticker_dfs = bulk_download_all(us_tickers, tw_tickers)
 
+    print('  Downloading benchmarks (SPY + ^TWII)...')
+    bench_ret = download_benchmarks()
+
     # Step 3b: 並行分析（純 CPU）
     batches = [all_tickers[i:i + BATCH_SIZE] for i in range(0, len(all_tickers), BATCH_SIZE)]
     all_results = []
@@ -1003,6 +1525,42 @@ def main():
                 f'| green:{green_now:>3}',
                 end='\r'
             )
+
+    # 補入超額報酬 rs_20d（個股 ret_20d − 大盤 ret_20d）
+    for r in all_results:
+        mkt = r.get('market', 'US')
+        b20 = bench_ret.get(mkt, {}).get('ret_20d')
+        r20 = r.get('ret_20d')
+        if r20 is not None and b20 is not None:
+            r['rs_20d'] = round(r20 - b20, 2)
+
+    # 補入台股籌碼面資料
+    print('  Fetching TW chip data (三大法人 + 融資融券)...')
+    try:
+        chip_inst   = fetch_chip_institutional()
+        chip_margin = fetch_chip_margin()
+        chip_merged = 0
+        for r in all_results:
+            if r.get('market') != 'TW':
+                continue
+            code = r['ticker'].split('.')[0]
+            ci   = chip_inst.get(code,   {})
+            cm   = chip_margin.get(code, {})
+            r['foreign_net'] = ci.get('foreign_net')
+            r['trust_net']   = ci.get('trust_net')
+            r['dealer_net']  = ci.get('dealer_net')
+            r['inst_total']  = ci.get('inst_total')
+            r['inst_buy']    = ci.get('inst_buy',  False)
+            r['inst_sell']   = ci.get('inst_sell', False)
+            r['margin_bal']  = cm.get('margin_bal')
+            r['short_bal']   = cm.get('short_bal')
+            r['margin_chg']  = cm.get('margin_chg')
+            r['short_chg']   = cm.get('short_chg')
+            if ci or cm:
+                chip_merged += 1
+        print(f'  [Chip] Merged into {chip_merged} TW stocks')
+    except Exception as e:
+        print(f'  [WARN] Chip data merge failed: {e}')
 
     green_total = sum(1 for r in all_results if r['all_green'])
     us_valid    = sum(1 for r in all_results if r.get('market') == 'US')
