@@ -190,8 +190,8 @@ def _fetch_tpex_stocks() -> dict:
 
         count = 0
         for item in data:
-            code = str(item.get('SecuritiesCode', '')).strip()
-            name = str(item.get('CompanyAbbreviation', '')).strip()
+            code = str(item.get('SecuritiesCompanyCode', item.get('SecuritiesCode', ''))).strip()
+            name = str(item.get('CompanyName', item.get('CompanyAbbreviation', ''))).strip()
 
             # 只保留 4 位數純數字
             if not code.isdigit() or len(code) != 4:

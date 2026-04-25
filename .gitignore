@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Scanner output (generated locally, don't commit local versions)
+results.json
+triple_st_dashboard.html
+
+# Keep entry_cache.json (committed for persistence across runs)
+# !entry_cache.json
