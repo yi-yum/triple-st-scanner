@@ -597,7 +597,7 @@ def bulk_download_all(us_tickers: list, tw_tickers: list) -> dict:
 
 
 def download_benchmarks() -> dict:
-    """下載 SPY (美股基準) 與 ^TWII (台股基準)，計算近期報酬率"""
+    """下載 SPY / ^TWII / ^VIX，計算近期報酬率並回傳 VIX 現值"""
     bench = {}
     for sym, mkt in [('SPY', 'US'), ('^TWII', 'TW')]:
         try:
@@ -613,7 +613,72 @@ def download_benchmarks() -> dict:
             print(f'  [Benchmark] {sym}: 5d={bench[mkt]["ret_5d"]}%  20d={bench[mkt]["ret_20d"]}%')
         except Exception as e:
             print(f'  [WARN] Benchmark {sym}: {e}')
+    # VIX
+    try:
+        vdf = yf.download('^VIX', period='5d', interval='1d', auto_adjust=True, progress=False)
+        if vdf is not None and not vdf.empty:
+            bench['vix'] = round(float(vdf['Close'].iloc[-1]), 2)
+            print(f'  [Benchmark] ^VIX: {bench["vix"]}')
+    except Exception as e:
+        print(f'  [WARN] VIX: {e}')
+        bench['vix'] = None
     return bench
+
+
+def fetch_earnings_dates(us_results: list) -> dict:
+    """
+    取得美股財報日期，回傳 {ticker: 'YYYY-MM-DD' or None}
+    只對全綠＋部分綠的標的發送請求，避免過多 API 呼叫。
+    """
+    candidates = [r['ticker'] for r in us_results
+                  if r.get('market') == 'US' and
+                     (r.get('all_green') or r.get('st1') == 1 or
+                      r.get('st2') == 1 or r.get('st3') == 1)]
+    result = {r['ticker']: None for r in us_results if r.get('market') == 'US'}
+    if not candidates:
+        return result
+
+    today = datetime.now(TW_TZ).date()
+
+    def _fetch_one(ticker):
+        try:
+            cal = yf.Ticker(ticker).calendar
+            if cal is None:
+                return ticker, None
+            vals = []
+            if isinstance(cal, pd.DataFrame) and not cal.empty:
+                if 'Earnings Date' in cal.index:
+                    raw = cal.loc['Earnings Date']
+                    vals = list(raw) if hasattr(raw, '__iter__') and not isinstance(raw, str) else [raw]
+            elif isinstance(cal, dict):
+                ed = cal.get('Earnings Date', cal.get('earningsDate'))
+                if ed:
+                    vals = list(ed) if isinstance(ed, (list, tuple)) else [ed]
+            future = []
+            for v in vals:
+                try:
+                    d = pd.Timestamp(v).date()
+                    if d >= today:
+                        future.append(d)
+                except Exception:
+                    pass
+            return ticker, str(min(future)) if future else None
+        except Exception:
+            return ticker, None
+
+    print(f'  Fetching earnings dates for {len(candidates)} US candidates...')
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(_fetch_one, t): t for t in candidates}
+        done = 0
+        for f in as_completed(futures):
+            ticker, ed = f.result()
+            result[ticker] = ed
+            done += 1
+            if done % 100 == 0:
+                print(f'  Earnings: {done}/{len(candidates)}')
+    found = sum(1 for v in result.values() if v)
+    print(f'  Earnings dates found: {found}/{len(candidates)}')
+    return result
 
 
 # ── 台股籌碼面資料 ────────────────────────────────────────────
@@ -847,7 +912,7 @@ def save_entry_cache(results: list):
 
 
 # ── 6. 生成 HTML 儀表板 ────────────────────────────────────────
-def generate_html(results: list, scan_time: str, ticker_meta: dict) -> str:
+def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float | None = None) -> str:
     # 補入名稱/產業/市場資訊
     for r in results:
         m = ticker_meta.get(r['ticker'], {})
@@ -1020,6 +1085,46 @@ table{min-width:1380px}
 /* 主力吃貨 */
 .badge-mainpower{font-family:var(--mono);font-size:8px;padding:1px 5px;border-radius:3px;
   background:rgba(245,200,66,.15);color:var(--yellow);border:1px solid rgba(245,200,66,.4)}
+/* ── Tab 系統 ── */
+.tab-nav{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:20px}
+.tab-btn{font-family:var(--mono);font-size:12px;padding:10px 22px;border:none;
+  background:transparent;color:var(--muted);cursor:pointer;
+  border-bottom:2px solid transparent;transition:all .15s;letter-spacing:.5px}
+.tab-btn:hover{color:var(--text)}
+.tab-btn.active{color:var(--green);border-bottom-color:var(--green)}
+.tab-panel{display:block}.tab-panel.hidden{display:none}
+/* ── 題材雷達 ── */
+.theme-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+@media(max-width:900px){.theme-row{grid-template-columns:1fr}}
+.theme-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.theme-card-title{font-family:var(--mono);font-size:9px;letter-spacing:2px;
+  color:var(--muted);text-transform:uppercase;margin-bottom:12px}
+/* 板塊色塊 */
+.sector-boxes{display:flex;flex-wrap:wrap;gap:6px}
+.sector-box{border-radius:7px;padding:9px 12px;cursor:pointer;transition:all .15s;
+  flex:1 1 140px;min-width:120px;max-width:220px}
+.sector-box:hover{opacity:.82;transform:translateY(-2px)}
+.sector-box-name{font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sector-box-stat{font-family:var(--mono);font-size:9px;opacity:.85;margin-top:3px}
+/* 財報預警 */
+.earn-list{display:flex;flex-direction:column;gap:5px;max-height:420px;overflow-y:auto}
+.earn-item{display:flex;align-items:center;gap:8px;padding:7px 10px;
+  border-radius:6px;border:1px solid var(--border);background:var(--bg3)}
+.earn-tag{font-family:var(--mono);font-size:9px;padding:2px 6px;border-radius:4px;white-space:nowrap}
+.earn-tag.urgent{background:rgba(255,85,102,.15);color:var(--red);border:1px solid rgba(255,85,102,.4)}
+.earn-tag.soon   {background:rgba(245,200,66,.15);color:var(--yellow);border:1px solid rgba(245,200,66,.4)}
+.earn-tag.safe   {background:rgba(74,158,255,.12);color:var(--blue);border:1px solid rgba(74,158,255,.35)}
+/* VIX 儀表 */
+.vix-panel{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.vix-val{font-family:var(--mono);font-size:40px;font-weight:700;line-height:1}
+.vix-bar-wrap{flex:1;min-width:160px}
+.vix-bar-track{height:10px;border-radius:5px;
+  background:linear-gradient(to right,#00d4aa,#f5c842,#ff5566);margin-bottom:6px;position:relative}
+.vix-bar-thumb{position:absolute;top:-3px;width:16px;height:16px;border-radius:50%;
+  background:#fff;border:2px solid var(--bg2);transform:translateX(-50%);transition:left .4s}
+.vix-legend{display:flex;justify-content:space-between;font-family:var(--mono);
+  font-size:9px;color:var(--muted)}
+.vix-label{font-size:11px;margin-top:8px;font-weight:700}
 </style>
 </head>
 <body>
@@ -1034,6 +1139,14 @@ table{min-width:1380px}
   <div class="scan-badge">掃描時間<br><strong style="color:var(--text)">__SCAN_TIME__</strong></div>
 </header>
 
+<!-- Tab 導覽 -->
+<div class="tab-nav">
+  <button class="tab-btn active" id="tabBtnScan"  onclick="switchTab('scan',this)">📊 個股掃描</button>
+  <button class="tab-btn"        id="tabBtnTheme" onclick="switchTab('theme',this)">🎯 題材雷達</button>
+</div>
+
+<!-- ── Tab 1：個股掃描 ── -->
+<div id="tab-scan" class="tab-panel">
 <div class="stats-row" id="statsRow"></div>
 
 <div class="controls">
@@ -1105,11 +1218,46 @@ table{min-width:1380px}
   ⚠ 本工具僅供研究與學習參考，不構成任何投資建議。數據來源：Yahoo Finance。<br>
   模擬損益基於首次三線全綠當日收盤價，不計交易成本，過去績效不代表未來結果。
 </div>
-</div>
+</div><!-- /tab-scan -->
+
+<!-- ── Tab 2：題材雷達 ── -->
+<div id="tab-theme" class="tab-panel hidden">
+
+  <!-- 第一排：板塊熱力圖 + 財報預警 -->
+  <div class="theme-row">
+
+    <div class="theme-card">
+      <div class="theme-card-title">🗺 美股板塊熱力圖 <span style="opacity:.5;font-size:8px">（點選跳至個股掃描）</span></div>
+      <div id="sectorBoxes" class="sector-boxes">
+        <div style="color:var(--muted);font-size:12px">載入中...</div>
+      </div>
+    </div>
+
+    <div class="theme-card">
+      <div class="theme-card-title">📅 財報預警 <span style="opacity:.5;font-size:8px">14天內 · 僅美股</span></div>
+      <div id="earningsListEl" class="earn-list">
+        <div style="color:var(--muted);font-size:12px">載入中...</div>
+      </div>
+    </div>
+
+  </div><!-- /theme-row -->
+
+  <!-- 第二排：VIX 市場情緒 -->
+  <div class="theme-card" style="margin-bottom:16px">
+    <div class="theme-card-title">😱 市場恐慌指數 VIX <span style="opacity:.5;font-size:8px">CBOE Volatility Index</span></div>
+    <div class="vix-panel" id="vixPanel">
+      <div style="color:var(--muted);font-size:12px">載入中...</div>
+    </div>
+  </div>
+
+</div><!-- /tab-theme -->
+
+</div><!-- /app -->
 
 <script>
 // ── Data ────────────────────────────────────────────────────
 const RAW = __DATA_JSON__;
+const VIX = __VIX_VALUE__;
 
 RAW.forEach(r => {
   r._statusRank = r.stop_loss ? 0 : r.all_green ? 1 : (r.st1===1||r.st2===1||r.st3===1) ? 2 : 3;
@@ -1499,11 +1647,145 @@ function renderStats() {
 
 // 初始渲染
 applyFilters();
+
+// ── Tab 切換 ─────────────────────────────────────────────────
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.remove('hidden');
+  btn.classList.add('active');
+  if (name === 'theme' && !window._themeBuilt) {
+    window._themeBuilt = true;
+    buildSectorHeatmap();
+    buildEarningsPanel();
+    buildVixPanel();
+  }
+}
+
+// ── 板塊熱力圖 ────────────────────────────────────────────────
+function buildSectorHeatmap() {
+  const sectors = {};
+  RAW.filter(r => r.market === 'US').forEach(r => {
+    const s = r.sector || 'Unknown';
+    if (!sectors[s]) sectors[s] = {total:0, green:0, pnl_sum:0, pnl_cnt:0};
+    sectors[s].total++;
+    if (r.all_green) {
+      sectors[s].green++;
+      if (r.pnl_pct != null) { sectors[s].pnl_sum += r.pnl_pct; sectors[s].pnl_cnt++; }
+    }
+  });
+
+  const list = Object.entries(sectors)
+    .filter(([, d]) => d.total >= 3)
+    .map(([name, d]) => ({
+      name,
+      total:     d.total,
+      green:     d.green,
+      green_pct: d.green / d.total,
+      avg_pnl:   d.pnl_cnt > 0 ? d.pnl_sum / d.pnl_cnt : null,
+    }))
+    .sort((a, b) => b.green_pct - a.green_pct);
+
+  const el = document.getElementById('sectorBoxes');
+  if (!list.length) { el.innerHTML = '<div style="color:var(--muted)">無資料</div>'; return; }
+
+  el.innerHTML = list.map(s => {
+    const pct = s.green_pct;
+    const hot = pct >= 0.6, warm = pct >= 0.3;
+    const bg     = hot  ? 'rgba(0,212,170,.15)' : warm ? 'rgba(245,200,66,.1)' : 'rgba(255,85,102,.08)';
+    const border = hot  ? 'rgba(0,212,170,.4)'  : warm ? 'rgba(245,200,66,.3)' : 'rgba(255,85,102,.25)';
+    const clr    = hot  ? 'var(--green)'         : warm ? 'var(--yellow)'        : 'var(--red)';
+    const pnlStr = s.avg_pnl != null
+      ? `${s.avg_pnl >= 0 ? '+' : ''}${s.avg_pnl.toFixed(1)}%` : '-';
+    const safeName = s.name.replace(/'/g, "\\'");
+    return `<div class="sector-box" style="background:${bg};border:1px solid ${border};color:${clr}"
+              onclick="jumpToSector('${safeName}')">
+              <div class="sector-box-name">${s.name}</div>
+              <div class="sector-box-stat">🟢 ${s.green}/${s.total} &nbsp;${(pct*100).toFixed(0)}%</div>
+              <div class="sector-box-stat">均損益 ${pnlStr}</div>
+            </div>`;
+  }).join('');
+}
+
+function jumpToSector(name) {
+  switchTab('scan', document.getElementById('tabBtnScan'));
+  const sel = document.getElementById('sectorSel');
+  sel.value = name;
+  applyFilters();
+}
+
+// ── 財報預警 ──────────────────────────────────────────────────
+function buildEarningsPanel() {
+  const today = new Date(); today.setHours(0,0,0,0);
+  const cutoff = new Date(today); cutoff.setDate(today.getDate() + 14);
+
+  const upcoming = RAW
+    .filter(r => r.market === 'US' && r.earnings_date)
+    .map(r => {
+      const ed = new Date(r.earnings_date);
+      return {...r, _ed: ed, _days: Math.ceil((ed - today) / 86400000)};
+    })
+    .filter(r => r._days >= 0 && r._days <= 14)
+    .sort((a, b) => a._days - b._days);
+
+  const el = document.getElementById('earningsListEl');
+  if (!upcoming.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px 0">未來 14 天內無財報預警標的</div>';
+    return;
+  }
+
+  el.innerHTML = upcoming.map(r => {
+    const cls     = r._days <= 2 ? 'urgent' : r._days <= 5 ? 'soon' : 'safe';
+    const dayStr  = r._days === 0 ? '今天' : r._days === 1 ? '明天' : `${r._days}d`;
+    const sigIcon = r.all_green ? '🟢' : (r.st1===1||r.st2===1||r.st3===1) ? '🟡' : '⚪';
+    const pnlClr  = (r.pnl_pct||0) >= 0 ? 'var(--green)' : 'var(--red)';
+    const pnlStr  = r.pnl_pct != null
+      ? `${r.pnl_pct >= 0 ? '+' : ''}${r.pnl_pct.toFixed(1)}%` : '';
+    return `<div class="earn-item">
+      <span class="earn-tag ${cls}">${dayStr}</span>
+      <span style="font-family:var(--mono);font-size:12px;font-weight:700;min-width:52px">${r.ticker}</span>
+      <span style="font-size:11px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name||''}</span>
+      <span>${sigIcon}</span>
+      <span style="font-family:var(--mono);font-size:11px;color:${pnlClr};min-width:44px;text-align:right">${pnlStr}</span>
+    </div>`;
+  }).join('');
+}
+
+// ── VIX 儀表 ──────────────────────────────────────────────────
+function buildVixPanel() {
+  const el = document.getElementById('vixPanel');
+  if (VIX === null) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px">VIX 資料暫時無法取得</div>';
+    return;
+  }
+  const pct  = Math.min(Math.max((VIX - 10) / 50, 0), 1);  // 10~60 映射 0~100%
+  const clr  = VIX < 15 ? 'var(--green)' : VIX < 25 ? 'var(--yellow)' : VIX < 35 ? 'var(--red)' : '#ff2244';
+  const label= VIX < 15 ? '低恐慌 · 貪婪' : VIX < 25 ? '中性' : VIX < 35 ? '高恐慌' : '極度恐慌';
+  el.innerHTML = `
+    <div class="vix-val" style="color:${clr}">${VIX}</div>
+    <div class="vix-bar-wrap">
+      <div class="vix-bar-track">
+        <div class="vix-bar-thumb" style="left:${(pct*100).toFixed(1)}%"></div>
+      </div>
+      <div class="vix-legend"><span>10</span><span>25</span><span>35</span><span>60+</span></div>
+      <div class="vix-label" style="color:${clr}">${label}</div>
+    </div>
+    <div style="font-size:11px;color:var(--muted);line-height:1.7">
+      VIX &lt; 15：市場樂觀，波動低<br>
+      15–25：正常區間，觀望為主<br>
+      25–35：恐慌升溫，需謹慎<br>
+      &gt; 35：極度恐慌，潛在反彈區
+    </div>`;
+}
 </script>
 </body>
 </html>"""
 
-    result = TEMPLATE.replace('__SCAN_TIME__', scan_time).replace('__DATA_JSON__', data_json)
+    vix_str = str(vix) if vix is not None else 'null'
+    result = (TEMPLATE
+              .replace('__SCAN_TIME__', scan_time)
+              .replace('__DATA_JSON__', data_json)
+              .replace('__VIX_VALUE__', vix_str))
     return result
 
 
@@ -1613,6 +1895,12 @@ def main():
     tw_valid    = sum(1 for r in all_results if r.get('market') == 'TW')
     print(f'\n  Done: {len(all_results)} valid (US:{us_valid} TW:{tw_valid}) | AllGreen: {green_total}')
 
+    # Step 3c: 財報日期
+    print('\n[3c] Fetching earnings dates...')
+    earnings_map = fetch_earnings_dates(all_results)
+    for r in all_results:
+        r['earnings_date'] = earnings_map.get(r['ticker'])
+
     # Step 4: 儲存結果
     print('\n[4/4] Saving results...')
     save_entry_cache(all_results)
@@ -1621,7 +1909,8 @@ def main():
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
     scan_time = datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M (UTC+8)')
-    html = generate_html(all_results, scan_time, ticker_meta)
+    vix_val   = bench_ret.get('vix')
+    html = generate_html(all_results, scan_time, ticker_meta, vix_val)
     with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
         f.write(html)
 
