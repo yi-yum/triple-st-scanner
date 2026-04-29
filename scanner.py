@@ -360,10 +360,11 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
         if len(df) < 40:
             return None
 
-        close = df['Close'].values.astype(float)
-        high  = df['High'].values.astype(float)
-        low   = df['Low'].values.astype(float)
-        vol   = df['Volume'].values.astype(float)
+        close  = df['Close'].values.astype(float)
+        high   = df['High'].values.astype(float)
+        low    = df['Low'].values.astype(float)
+        vol    = df['Volume'].values.astype(float)
+        open_p = df['Open'].values.astype(float)
 
         cur_price = float(close[-1])
         avg_vol   = float(np.mean(vol[-20:]))
@@ -442,6 +443,17 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
         # 量比 = 今日量 / 20日均量
         vol_ratio = round(float(vol[-1]/avg_vol), 2) if avg_vol > 0 else None
 
+        # 主力吃貨訊號（台股適用：爆量吸籌 + 盤整 + 紅K）
+        today_money    = cur_price * float(vol[-1])
+        vol10_std      = float(np.std(close[-10:]))  if len(close) >= 10 else None
+        vol10_mean     = float(np.mean(close[-10:])) if len(close) >= 10 else None
+        volatility_10  = (vol10_std / vol10_mean) if (vol10_std is not None and vol10_mean and vol10_mean > 0) else 1.0
+        pct_chg_1d     = float((close[-1] - close[-2]) / close[-2]) if len(close) >= 2 else 0.0
+        cond_vol_spike   = (vol_ratio is not None and vol_ratio > 2.5) and (today_money > 20_000_000)
+        cond_price_stable = (volatility_10 < 0.05) or (abs(pct_chg_1d) < 0.07)
+        cond_bullish_k    = close[-1] > open_p[-1]
+        mainpower = bool(cond_vol_spike and cond_price_stable and cond_bullish_k)
+
         # 多日報酬率
         ret_5d  = round((cur_price-float(close[-6]))/float(close[-6])*100, 2)  if len(close)>=6  else None
         ret_20d = round((cur_price-float(close[-21]))/float(close[-21])*100, 2) if len(close)>=21 else None
@@ -481,6 +493,7 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
             'adx':            round(cur_adx, 1) if cur_adx is not None else None,
             'atr_pct':        atr_pct,
             'vol_ratio':      vol_ratio,
+            'mainpower':      mainpower,
             'ret_5d':         ret_5d,
             'ret_20d':        ret_20d,
             'pct_from_52w':   pct_from_52w,
@@ -992,6 +1005,9 @@ tbody tr.row-today-r{background:rgba(255,85,102,.08);border-left:3px solid var(-
 .badge-inst-sell{font-family:var(--mono);font-size:8px;padding:1px 5px;border-radius:3px;
   background:rgba(255,85,102,.15);color:var(--red);border:1px solid rgba(255,85,102,.4)}
 table{min-width:1380px}
+/* 主力吃貨 */
+.badge-mainpower{font-family:var(--mono);font-size:8px;padding:1px 5px;border-radius:3px;
+  background:rgba(245,200,66,.15);color:var(--yellow);border:1px solid rgba(245,200,66,.4)}
 </style>
 </head>
 <body>
@@ -1036,6 +1052,7 @@ table{min-width:1380px}
   <button class="fbtn active" id="btnChipAll"  onclick="setChip('all',this)">全部</button>
   <button class="fbtn"        id="btnChipBuy"  onclick="setChip('buy',this)">🟢 外資+投信同買</button>
   <button class="fbtn"        id="btnChipSell" onclick="setChip('sell',this)">🔴 外資+投信同賣</button>
+  <button class="fbtn"        id="btnMainpower" onclick="setMainpower(this)">🦊 主力吃貨 <span style="font-size:8px;opacity:.6">TW</span></button>
   <div class="ctrl-sep"></div>
   <span class="ctrl-label">產業</span>
   <select id="sectorSel" onchange="applyFilters()">
@@ -1150,9 +1167,24 @@ function setChip(v, btn) {
   curChip = v;
   document.querySelectorAll('[id^=btnChip]').forEach(b =>
     b.classList.remove('active','active-r','active-p'));
+  document.getElementById('btnMainpower').classList.remove('active','active-y','active-r','active-p');
   if (v==='buy')  btn.classList.add('active');
   else if (v==='sell') btn.classList.add('active-r');
   else btn.classList.add('active');
+  applyFilters();
+}
+
+function setMainpower(btn) {
+  if (curChip === 'mainpower') {
+    curChip = 'all';
+    btn.classList.remove('active-y');
+    document.getElementById('btnChipAll').classList.add('active');
+  } else {
+    curChip = 'mainpower';
+    document.querySelectorAll('[id^=btnChip]').forEach(b =>
+      b.classList.remove('active','active-r','active-p'));
+    btn.classList.add('active-y');
+  }
   applyFilters();
 }
 
@@ -1175,8 +1207,9 @@ function applyFilters() {
     // ADX filter
     if (curAdx === 'strong' && !(r.adx != null && r.adx > 25))         return false;
     // Chip filter (TW only)
-    if (curChip === 'buy'  && !r.inst_buy)  return false;
-    if (curChip === 'sell' && !r.inst_sell) return false;
+    if (curChip === 'buy'       && !r.inst_buy)   return false;
+    if (curChip === 'sell'      && !r.inst_sell)  return false;
+    if (curChip === 'mainpower' && !r.mainpower)  return false;
     if (sector && r.sector !== sector) return false;
     if (q && !r.ticker.includes(q) && !(r.name||'').toUpperCase().includes(q)) return false;
     return true;
@@ -1346,8 +1379,9 @@ function render() {
             : r.inst_sell
               ? '<span class="badge-inst-sell">外資+投信同賣</span>'
               : '';
+          const mpBadge = r.mainpower ? '<span class="badge-mainpower">主力吃貨</span>' : '';
           return `${fmtChipNet(r.foreign_net,'外資買賣超')}
-                  <span class="ind2">${fmtChipNet(r.trust_net,'投信買賣超')} ${instBadge}</span>`;
+                  <span class="ind2">${fmtChipNet(r.trust_net,'投信買賣超')} ${instBadge}${mpBadge}</span>`;
         })()}
       </td>
       <td>
