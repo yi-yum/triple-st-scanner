@@ -11,11 +11,14 @@ import numpy as np
 import json
 import os
 import io
+import time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 warnings.filterwarnings('ignore')
+
+TW_TZ = timezone(timedelta(hours=8))   # UTC+8 台灣時區
 
 # Windows terminal UTF-8
 import sys
@@ -65,14 +68,15 @@ def _fetch_sp_wiki(url: str, sym_col: str, name_col: str, sec_col: str) -> dict:
             print(f'  [WARN] Cannot find symbol column for {label}')
             return meta
 
+        keep_cols = [c for c in [sym_col_f, name_col_f, sec_col_f] if c]
         count = 0
-        for _, row in df.iterrows():
-            ticker = str(row[sym_col_f]).strip().replace('.', '-').upper()
+        for rec in df[keep_cols].to_dict('records'):
+            ticker = str(rec[sym_col_f]).strip().replace('.', '-').upper()
             if not ticker or ticker == 'NAN':
                 continue
             meta[ticker] = {
-                'name':     str(row[name_col_f]).strip() if name_col_f else ticker,
-                'sector':   str(row[sec_col_f]).strip()  if sec_col_f  else 'Unknown',
+                'name':     str(rec[name_col_f]).strip() if name_col_f else ticker,
+                'sector':   str(rec[sec_col_f]).strip()  if sec_col_f  else 'Unknown',
                 'market':   'US',
                 'currency': 'USD',
             }
@@ -119,14 +123,15 @@ def _fetch_russell2000() -> dict:
             print('  [FAIL] Russell 2000: No Ticker column found')
             return meta
 
+        keep_cols = [c for c in [ticker_col, name_col, sector_col, asset_col] if c]
         count = 0
-        for _, row in df.iterrows():
-            ticker = str(row[ticker_col]).strip().strip('"').upper()
+        for rec in df[keep_cols].to_dict('records'):
+            ticker = str(rec[ticker_col]).strip().strip('"').upper()
             if not ticker or ticker in ('-', 'NAN', '', '-'):
                 continue
             # 只保留 Equity 類型 (跳過現金/衍生品)
             if asset_col:
-                asset = str(row[asset_col]).strip().upper()
+                asset = str(rec[asset_col]).strip().upper()
                 if 'EQUITY' not in asset and asset not in ('STOCK',):
                     continue
             # ticker 只允許英文字母和 - (排除數字代碼)
@@ -135,8 +140,8 @@ def _fetch_russell2000() -> dict:
                 continue
 
             meta[ticker] = {
-                'name':     str(row[name_col]).strip()   if name_col   else ticker,
-                'sector':   str(row[sector_col]).strip() if sector_col else 'Unknown',
+                'name':     str(rec[name_col]).strip()    if name_col    else ticker,
+                'sector':   str(rec[sector_col]).strip()  if sector_col  else 'Unknown',
                 'market':   'US',
                 'currency': 'USD',
             }
@@ -517,19 +522,27 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
 
 
 # ── 4. 批次下載 ────────────────────────────────────────────────
-def _bulk_download_chunk(tickers: list, label: str = '') -> dict:
-    """下載一批股票，回傳 {ticker: DataFrame}"""
+def _bulk_download_chunk(tickers: list, label: str = '', retries: int = 2) -> dict:
+    """下載一批股票，回傳 {ticker: DataFrame}；失敗最多重試 retries 次"""
     if not tickers:
         return {}
-    try:
-        data = yf.download(
-            tickers, period='1y', interval='1d',
-            group_by='ticker', auto_adjust=True,
-            progress=False, threads=False
-        )
-    except Exception as e:
-        print(f'  [WARN] Download failed ({label}): {e}')
-        return {}
+    data = None
+    for attempt in range(retries + 1):
+        try:
+            data = yf.download(
+                tickers, period='1y', interval='1d',
+                group_by='ticker', auto_adjust=True,
+                progress=False, threads=False
+            )
+            break
+        except Exception as e:
+            if attempt < retries:
+                wait = 5 * (attempt + 1)
+                print(f'  [WARN] Download failed ({label}), retry {attempt+1}/{retries} in {wait}s: {e}')
+                time.sleep(wait)
+            else:
+                print(f'  [WARN] Download failed ({label}) after {retries+1} attempts: {e}')
+                return {}
 
     if data is None or data.empty:
         return {}
@@ -606,9 +619,8 @@ def download_benchmarks() -> dict:
 # ── 台股籌碼面資料 ────────────────────────────────────────────
 
 def _chip_date() -> str:
-    """取得最新交易日字串 YYYYMMDD，週末退回上週五"""
-    from datetime import timedelta
-    d = datetime.now()
+    """取得最新交易日字串 YYYYMMDD，週末退回上週五（以台灣時區 UTC+8 為基準）"""
+    d = datetime.now(TW_TZ)
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d.strftime('%Y%m%d')
@@ -1209,7 +1221,7 @@ function applyFilters() {
     // Chip filter (TW only)
     if (curChip === 'buy'       && !r.inst_buy)   return false;
     if (curChip === 'sell'      && !r.inst_sell)  return false;
-    if (curChip === 'mainpower' && !r.mainpower)  return false;
+    if (curChip === 'mainpower' && !(r.market === 'TW' && r.mainpower)) return false;
     if (sector && r.sector !== sector) return false;
     if (q && !r.ticker.includes(q) && !(r.name||'').toUpperCase().includes(q)) return false;
     return true;
@@ -1608,7 +1620,7 @@ def main():
     with open('results.json', 'w', encoding='utf-8') as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    scan_time = datetime.now().strftime('%Y-%m-%d %H:%M')
+    scan_time = datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M (UTC+8)')
     html = generate_html(all_results, scan_time, ticker_meta)
     with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
         f.write(html)
