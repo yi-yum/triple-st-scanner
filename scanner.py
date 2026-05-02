@@ -11,11 +11,6 @@ import numpy as np
 import json
 import os
 from pathlib import Path
-try:
-    import google.generativeai as genai
-    _GENAI_AVAILABLE = True
-except ImportError:
-    _GENAI_AVAILABLE = False
 import io
 import time
 import requests
@@ -921,9 +916,9 @@ def save_entry_cache(results: list):
 
 # ── 6. 生成 HTML 儀表板 ────────────────────────────────────────
 def analyze_with_gemini(results: list, vix: float | None) -> str:
-    """用 Gemini 分析全綠與今日轉綠股票的整體市場情緒，回傳 HTML 字串。"""
+    """用 Gemini REST API 分析全綠與今日轉綠股票的整體市場情緒。"""
     api_key = os.environ.get('GEMINI_API_KEY', '')
-    if not api_key or not _GENAI_AVAILABLE:
+    if not api_key:
         return ''
     try:
         from collections import Counter
@@ -943,7 +938,7 @@ def analyze_with_gemini(results: list, vix: float | None) -> str:
                 )
             return '\n'.join(rows) if rows else '  （無）'
 
-        sector_cnt  = Counter(r.get('sector','Unknown') for r in all_green)
+        sector_cnt  = Counter(r.get('sector', 'Unknown') for r in all_green)
         top_sectors = ', '.join(f"{s}({n})" for s, n in sector_cnt.most_common(5))
 
         prompt = f"""你是一位專業的股票市場分析師。以下是今日三重超級趨勢（Triple Supertrend）掃描結果，請用**繁體中文**進行分析。
@@ -969,10 +964,17 @@ VIX 恐慌指數：{vix if vix else '無資料'}
 
 請用 Markdown 格式輸出，不要加額外說明。"""
 
-        genai.configure(api_key=api_key)
-        model    = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        text     = response.text.strip()
+        url = (
+            'https://generativelanguage.googleapis.com/v1beta/models/'
+            f'gemini-1.5-flash:generateContent?key={api_key}'
+        )
+        payload = {
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {'maxOutputTokens': 1024, 'temperature': 0.4}
+        }
+        resp = requests.post(url, json=payload, timeout=60)
+        resp.raise_for_status()
+        text = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
         print(f'  [Gemini] Analysis done ({len(text)} chars)')
         return text
     except Exception as e:
