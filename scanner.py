@@ -916,54 +916,106 @@ def save_entry_cache(results: list):
 
 
 # ── 6. 生成 HTML 儀表板 ────────────────────────────────────────
+def _fetch_us_fundamentals(tickers: list) -> dict:
+    """抓取美股基本面資料，每支約 1-2 秒，最多抓 20 支。"""
+    result = {}
+    for t in tickers[:20]:
+        try:
+            info = yf.Ticker(t).info
+            def pct(v):
+                return f"{v*100:.1f}%" if v is not None else '—'
+            def num(v, dec=1):
+                return f"{v:.{dec}f}" if v is not None else '—'
+            result[t] = {
+                'pe':           num(info.get('trailingPE')),
+                'fwd_pe':       num(info.get('forwardPE')),
+                'eps_growth':   pct(info.get('earningsGrowth')),
+                'rev_growth':   pct(info.get('revenueGrowth')),
+                'gross_margin': pct(info.get('grossMargins')),
+            }
+        except Exception as e:
+            print(f'  [WARN] Fundamentals {t}: {e}')
+            result[t] = {}
+    return result
+
+
 def analyze_with_gemini(results: list, vix: float | None) -> str:
-    """用 Gemini REST API 分析全綠與今日轉綠股票的整體市場情緒。"""
+    """用 Gemini REST API 分析全綠股票：美股基本面、台股籌碼面。"""
     api_key = os.environ.get('GEMINI_API_KEY', '')
     if not api_key:
         return ''
     try:
         from collections import Counter
-        all_green   = [r for r in results if r.get('all_green')]
-        just_green  = [r for r in results if r.get('today_change') == 'to_green']
-        us_green    = [r for r in all_green if r.get('market') == 'US']
-        tw_green    = [r for r in all_green if r.get('market') == 'TW']
-
-        def fmt(lst, max_n=20):
-            rows = []
-            for r in lst[:max_n]:
-                rows.append(
-                    f"  {r['ticker']} ({r.get('sector','?')}) "
-                    f"RSI={r.get('rsi','?')} ADX={r.get('adx','?')} "
-                    f"5d={r.get('ret_5d','?')}% 20d={r.get('ret_20d','?')}% "
-                    f"量比={r.get('vol_ratio','?')}"
-                )
-            return '\n'.join(rows) if rows else '  （無）'
+        all_green  = [r for r in results if r.get('all_green')]
+        just_green = [r for r in results if r.get('today_change') == 'to_green']
+        us_green   = sorted([r for r in all_green if r.get('market') == 'US'],
+                            key=lambda x: x.get('rs_20d') or -9999, reverse=True)
+        tw_green   = sorted([r for r in all_green if r.get('market') == 'TW'],
+                            key=lambda x: (x.get('inst_total') or 0), reverse=True)
 
         sector_cnt  = Counter(r.get('sector', 'Unknown') for r in all_green)
         top_sectors = ', '.join(f"{s}({n})" for s, n in sector_cnt.most_common(5))
 
-        prompt = f"""你是一位專業的股票市場分析師。以下是今日三重超級趨勢（Triple Supertrend）掃描結果，請用**繁體中文**進行分析。
+        # ── 美股：抓基本面（超額報酬最高前20支）──
+        print(f'  [Gemini] Fetching fundamentals for top {min(20,len(us_green))} US stocks...')
+        us_fundamentals = _fetch_us_fundamentals([r['ticker'] for r in us_green])
+
+        def fmt_us(lst):
+            rows = []
+            for r in lst[:20]:
+                t = r['ticker']
+                f = us_fundamentals.get(t, {})
+                rows.append(
+                    f"  {t} ({r.get('sector','?')}) "
+                    f"PE={f.get('pe','—')} FwdPE={f.get('fwd_pe','—')} "
+                    f"EPS成長={f.get('eps_growth','—')} 營收成長={f.get('rev_growth','—')} 毛利率={f.get('gross_margin','—')} "
+                    f"| RS={r.get('rs_20d','—')} RSI={r.get('rsi','—')}"
+                )
+            return '\n'.join(rows) if rows else '  （無）'
+
+        # ── 台股：整理籌碼面 ──
+        def fmt_tw(lst):
+            rows = []
+            for r in lst[:20]:
+                def m(v): return f"{v/1e8:.1f}億" if v else '—'
+                rows.append(
+                    f"  {r['ticker']} ({r.get('sector','?')}) "
+                    f"外資{m(r.get('foreign_net'))} 投信{m(r.get('trust_net'))} 自營{m(r.get('dealer_net'))} "
+                    f"法人{'買超' if r.get('inst_buy') else ('賣超' if r.get('inst_sell') else '—')} "
+                    f"融資變化{r.get('margin_chg') or '—'} 融券變化{r.get('short_chg') or '—'}"
+                )
+            return '\n'.join(rows) if rows else '  （無）'
+
+        prompt = f"""你是一位專業股票市場分析師，請用**繁體中文**分析以下今日三重超級趨勢（Triple Supertrend）全綠掃描結果。
 
 === 市場概況 ===
-VIX 恐慌指數：{vix if vix else '無資料'}
-全綠股票數量：{len(all_green)} 支（美股 {len(us_green)}、台股 {len(tw_green)}）
-今日新轉綠：{len(just_green)} 支
-最強產業（全綠）：{top_sectors if top_sectors else '無'}
+VIX：{vix if vix else '無資料'} | 全綠：{len(all_green)}支（美股{len(us_green)} / 台股{len(tw_green)}）| 今日新轉綠：{len(just_green)}支
+強勢產業：{top_sectors or '無'}
 
-=== 全綠股票（最多顯示20支）===
-{fmt(all_green)}
+=== 美股全綠 TOP 20（依超額報酬排序，附基本面）===
+{fmt_us(us_green)}
 
-=== 今日新轉綠（最多顯示20支）===
-{fmt(just_green)}
+=== 台股全綠 TOP 20（依法人買超排序，附籌碼面）===
+{fmt_tw(tw_green)}
 
-請依以下結構分析（每點 2-3 句，簡潔有力）：
-1. **整體市場情緒**：根據 VIX、全綠數量、產業分佈，判斷目前是多頭/盤整/謹慎狀態。
-2. **強勢產業**：哪些產業集中亮燈，代表資金流向。
-3. **今日訊號**：新轉綠的股票有何值得關注之處。
-4. **風險提示**：RSI 過高、量比異常或其他需注意的警訊。
-5. **操作建議**：根據以上，給出簡短的整體策略建議。
+請依以下結構輸出分析，每個區塊用 ## 標題：
 
-請用 Markdown 格式輸出，不要加額外說明。"""
+## 整體市場情緒
+根據 VIX 與全綠數量，判斷市場多頭強度。
+
+## 美股基本面亮點
+針對上方美股個股，點出基本面最強（低 PE + 高成長）與需留意（PE 過高或成長趨緩）的標的，每支 1 句。
+
+## 台股籌碼面亮點
+針對上方台股個股，點出籌碼最集中（外資/投信同步買超 + 融資收斂）與需留意（籌碼分散）的標的，每支 1 句。
+
+## 今日新轉綠訊號
+今日新進場訊號有何值得關注之處。
+
+## 風險提示與操作建議
+綜合以上，給出風險提示與整體操作建議。
+
+請用 Markdown 格式，不要加額外說明。"""
 
         # 動態取得可用的 flash model
         list_url = f'https://generativelanguage.googleapis.com/v1beta/models?key={api_key}'
@@ -990,7 +1042,7 @@ VIX 恐慌指數：{vix if vix else '無資料'}
         payload = {
             'contents': [{'parts': [{'text': prompt}]}],
             'generationConfig': {
-                'maxOutputTokens': 2048,
+                'maxOutputTokens': 4096,
                 'temperature': 0.4,
                 'thinkingConfig': {'thinkingBudget': 0}  # 關閉思考模式，節省 token
             }
