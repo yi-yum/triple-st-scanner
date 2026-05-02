@@ -10,5 +10,8 @@ venv/
 results.json
 triple_st_dashboard.html
 
+# UI template IS committed (edit this to change the look)
+# template.html  ← intentionally NOT ignored
+
 # Keep entry_cache.json (committed for persistence across runs)
 # !entry_cache.json
