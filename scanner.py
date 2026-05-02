@@ -964,19 +964,28 @@ VIX 恐慌指數：{vix if vix else '無資料'}
 
 請用 Markdown 格式輸出，不要加額外說明。"""
 
-        url = (
-            'https://generativelanguage.googleapis.com/v1beta/models/'
-            f'gemini-1.5-flash:generateContent?key={api_key}'
-        )
-        payload = {
-            'contents': [{'parts': [{'text': prompt}]}],
-            'generationConfig': {'maxOutputTokens': 1024, 'temperature': 0.4}
-        }
-        resp = requests.post(url, json=payload, timeout=60)
-        resp.raise_for_status()
-        text = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-        print(f'  [Gemini] Analysis done ({len(text)} chars)')
-        return text
+        for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-latest']:
+            url = (
+                'https://generativelanguage.googleapis.com/v1beta/models/'
+                f'{model_name}:generateContent?key={api_key}'
+            )
+            payload = {
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {'maxOutputTokens': 1024, 'temperature': 0.4}
+            }
+            try:
+                resp = requests.post(url, json=payload, timeout=60)
+                print(f'  [Gemini] {model_name} status={resp.status_code}')
+                if resp.status_code != 200:
+                    print(f'  [Gemini] response: {resp.text[:300]}')
+                    continue
+                text = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                print(f'  [Gemini] Analysis done via {model_name} ({len(text)} chars)')
+                return text
+            except Exception as e:
+                print(f'  [WARN] Gemini {model_name} failed: {e}')
+                continue
+        return ''
     except Exception as e:
         print(f'  [WARN] Gemini analysis failed: {e}')
         return ''
