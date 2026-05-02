@@ -919,19 +919,47 @@ def save_entry_cache(results: list):
 def _fetch_us_fundamentals(tickers: list) -> dict:
     """抓取美股基本面資料，每支約 1-2 秒，最多抓 20 支。"""
     result = {}
+    _KEY_SETS = {
+        'pe':           ['trailingPE', 'trailingP/E'],
+        'fwd_pe':       ['forwardPE',  'forwardP/E'],
+        'eps_growth':   ['earningsGrowth', 'earningsQuarterlyGrowth', 'epsTrailingTwelveMonths'],
+        'rev_growth':   ['revenueGrowth',  'quarterlyRevenueGrowth'],
+        'gross_margin': ['grossMargins',   'grossProfitMargins'],
+    }
+    def pct(v):
+        return f"{v*100:.1f}%" if v is not None else '—'
+    def num(v):
+        return f"{v:.1f}" if v is not None else '—'
+
     for t in tickers[:20]:
         try:
             info = yf.Ticker(t).info
-            def pct(v):
-                return f"{v*100:.1f}%" if v is not None else '—'
-            def num(v, dec=1):
-                return f"{v:.{dec}f}" if v is not None else '—'
+            # 首次只印第一支股票的 key，方便 debug
+            if t == tickers[0]:
+                filled = {k: v for k, v in info.items() if v is not None and k in
+                          ['trailingPE','forwardPE','earningsGrowth','revenueGrowth',
+                           'grossMargins','earningsQuarterlyGrowth','quarterlyRevenueGrowth']}
+                print(f'  [Fundamentals] {t} sample keys: {filled}')
+
+            def pick(keys):
+                for k in keys:
+                    v = info.get(k)
+                    if v is not None:
+                        return v
+                return None
+
+            pe_val  = pick(_KEY_SETS['pe'])
+            fpe_val = pick(_KEY_SETS['fwd_pe'])
+            eg_val  = pick(_KEY_SETS['eps_growth'])
+            rg_val  = pick(_KEY_SETS['rev_growth'])
+            gm_val  = pick(_KEY_SETS['gross_margin'])
+
             result[t] = {
-                'pe':           num(info.get('trailingPE')),
-                'fwd_pe':       num(info.get('forwardPE')),
-                'eps_growth':   pct(info.get('earningsGrowth')),
-                'rev_growth':   pct(info.get('revenueGrowth')),
-                'gross_margin': pct(info.get('grossMargins')),
+                'pe':           num(pe_val),
+                'fwd_pe':       num(fpe_val),
+                'eps_growth':   pct(eg_val)  if eg_val  and abs(eg_val) < 100 else '—',
+                'rev_growth':   pct(rg_val)  if rg_val  and abs(rg_val) < 100 else '—',
+                'gross_margin': pct(gm_val)  if gm_val  else '—',
             }
         except Exception as e:
             print(f'  [WARN] Fundamentals {t}: {e}')
