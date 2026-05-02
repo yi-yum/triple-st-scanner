@@ -11,6 +11,11 @@ import numpy as np
 import json
 import os
 from pathlib import Path
+try:
+    import google.generativeai as genai
+    _GENAI_AVAILABLE = True
+except ImportError:
+    _GENAI_AVAILABLE = False
 import io
 import time
 import requests
@@ -915,6 +920,66 @@ def save_entry_cache(results: list):
 
 
 # ── 6. 生成 HTML 儀表板 ────────────────────────────────────────
+def analyze_with_gemini(results: list, vix: float | None) -> str:
+    """用 Gemini 分析全綠與今日轉綠股票的整體市場情緒，回傳 HTML 字串。"""
+    api_key = os.environ.get('GEMINI_API_KEY', '')
+    if not api_key or not _GENAI_AVAILABLE:
+        return ''
+    try:
+        from collections import Counter
+        all_green   = [r for r in results if r.get('all_green')]
+        just_green  = [r for r in results if r.get('today_change') == 'to_green']
+        us_green    = [r for r in all_green if r.get('market') == 'US']
+        tw_green    = [r for r in all_green if r.get('market') == 'TW']
+
+        def fmt(lst, max_n=20):
+            rows = []
+            for r in lst[:max_n]:
+                rows.append(
+                    f"  {r['ticker']} ({r.get('sector','?')}) "
+                    f"RSI={r.get('rsi','?')} ADX={r.get('adx','?')} "
+                    f"5d={r.get('ret_5d','?')}% 20d={r.get('ret_20d','?')}% "
+                    f"量比={r.get('vol_ratio','?')}"
+                )
+            return '\n'.join(rows) if rows else '  （無）'
+
+        sector_cnt  = Counter(r.get('sector','Unknown') for r in all_green)
+        top_sectors = ', '.join(f"{s}({n})" for s, n in sector_cnt.most_common(5))
+
+        prompt = f"""你是一位專業的股票市場分析師。以下是今日三重超級趨勢（Triple Supertrend）掃描結果，請用**繁體中文**進行分析。
+
+=== 市場概況 ===
+VIX 恐慌指數：{vix if vix else '無資料'}
+全綠股票數量：{len(all_green)} 支（美股 {len(us_green)}、台股 {len(tw_green)}）
+今日新轉綠：{len(just_green)} 支
+最強產業（全綠）：{top_sectors if top_sectors else '無'}
+
+=== 全綠股票（最多顯示20支）===
+{fmt(all_green)}
+
+=== 今日新轉綠（最多顯示20支）===
+{fmt(just_green)}
+
+請依以下結構分析（每點 2-3 句，簡潔有力）：
+1. **整體市場情緒**：根據 VIX、全綠數量、產業分佈，判斷目前是多頭/盤整/謹慎狀態。
+2. **強勢產業**：哪些產業集中亮燈，代表資金流向。
+3. **今日訊號**：新轉綠的股票有何值得關注之處。
+4. **風險提示**：RSI 過高、量比異常或其他需注意的警訊。
+5. **操作建議**：根據以上，給出簡短的整體策略建議。
+
+請用 Markdown 格式輸出，不要加額外說明。"""
+
+        genai.configure(api_key=api_key)
+        model    = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        text     = response.text.strip()
+        print(f'  [Gemini] Analysis done ({len(text)} chars)')
+        return text
+    except Exception as e:
+        print(f'  [WARN] Gemini analysis failed: {e}')
+        return ''
+
+
 def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float | None = None) -> str:
     # 補入名稱/產業/市場資訊
     for r in results:
@@ -932,11 +997,13 @@ def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float |
     template_path = Path(__file__).parent / 'template.html'
     TEMPLATE = template_path.read_text(encoding='utf-8')
 
-    vix_str = str(vix) if vix is not None else 'null'
+    vix_str     = str(vix) if vix is not None else 'null'
+    ai_analysis = analyze_with_gemini(results, vix)
     result = (TEMPLATE
               .replace('__SCAN_TIME__', scan_time)
               .replace('__DATA_JSON__', data_json)
-              .replace('__VIX_VALUE__', vix_str))
+              .replace('__VIX_VALUE__', vix_str)
+              .replace('__AI_ANALYSIS__', ai_analysis))
     return result
 
 

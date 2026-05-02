@@ -238,6 +238,55 @@ table{min-width:1380px}
 }
 .tick-btn:hover{color:#fff;text-decoration:underline}
 
+/* ── AI Analysis Modal ── */
+.ai-overlay{
+  display:none;position:fixed;inset:0;z-index:500;
+  background:rgba(0,0,0,.7);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center;
+}
+.ai-overlay.open{display:flex}
+.ai-modal{
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:12px;overflow:hidden;
+  width:min(760px,95vw);height:min(620px,85vh);
+  display:flex;flex-direction:column;
+  box-shadow:0 24px 80px rgba(0,0,0,.6);
+}
+.ai-modal-hdr{
+  display:flex;align-items:center;gap:10px;
+  padding:12px 16px;border-bottom:1px solid var(--border);
+  background:var(--bg3);flex-shrink:0;
+}
+.ai-modal-title{font-size:14px;font-weight:600;color:var(--text)}
+.ai-badge{
+  font-size:9px;font-weight:700;letter-spacing:.5px;
+  padding:2px 7px;border-radius:10px;
+  background:rgba(99,102,241,.18);color:#818cf8;
+  border:1px solid rgba(99,102,241,.3);
+}
+.ai-modal-body{
+  flex:1;overflow-y:auto;padding:20px 24px;
+  font-size:13px;line-height:1.75;color:var(--text);
+}
+.ai-modal-body h2{font-size:13px;font-weight:700;color:var(--green);margin:16px 0 6px}
+.ai-modal-body h3{font-size:12px;font-weight:700;color:var(--blue);margin:14px 0 5px}
+.ai-modal-body p{margin:0 0 10px;color:var(--text-sub,#cbd5e1)}
+.ai-modal-body strong{color:var(--text)}
+.ai-modal-body ul{margin:0 0 10px;padding-left:18px}
+.ai-modal-body li{margin-bottom:4px;color:var(--text-sub,#cbd5e1)}
+.ai-modal-body hr{border:none;border-top:1px solid var(--border);margin:14px 0}
+.ai-empty{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  height:100%;gap:10px;color:var(--muted);font-size:13px;
+}
+.ai-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  background:rgba(99,102,241,.12);border:1px solid rgba(99,102,241,.3);
+  color:#818cf8;border-radius:8px;padding:6px 14px;
+  font-size:12px;font-weight:600;cursor:pointer;transition:all .15s;
+}
+.ai-btn:hover{background:rgba(99,102,241,.22);color:#a5b4fc}
+
 /* ── TradingView Modal ── */
 .tv-overlay{
   display:none;position:fixed;inset:0;z-index:500;
@@ -288,7 +337,10 @@ table{min-width:1380px}
     <div class="brand-tag">US + TW Equity · Triple Supertrend Scanner</div>
     <div class="brand-title">Triple <span>ST</span> Scanner</div>
   </div>
-  <div class="scan-badge">掃描時間 &nbsp;<strong style="color:var(--text)">__SCAN_TIME__</strong></div>
+  <div style="display:flex;align-items:center;gap:12px">
+    <div class="scan-badge">掃描時間 &nbsp;<strong style="color:var(--text)">__SCAN_TIME__</strong></div>
+    <button class="ai-btn" onclick="openAI()" id="ai-open-btn">✦ AI 市場分析</button>
+  </div>
 </header>
 
 <!-- Tab 導覽 -->
@@ -1021,6 +1073,49 @@ function buildVixPanel() {
     </div>`;
 }
 
+// ── AI Analysis Modal ──────────────────────────────────────
+const AI_RAW = `__AI_ANALYSIS__`;
+
+function markdownToHtml(md) {
+  if (!md) return '';
+  return md
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/^## (.+)$/gm,'<h2>$1</h2>')
+    .replace(/^### (.+)$/gm,'<h3>$1</h3>')
+    .replace(/^#### (.+)$/gm,'<h3>$1</h3>')
+    .replace(/^\d+\.\s+\*\*(.+?)\*\*[:：]?(.*)/gm,'<h2>$1</h2><p>$2</p>')
+    .replace(/^[-*]\s+(.+)$/gm,'<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, s => `<ul>${s}</ul>`)
+    .replace(/^(?!<[hup])(.+)$/gm,'<p>$1</p>')
+    .replace(/^---$/gm,'<hr>')
+    .replace(/<p><\/p>/g,'');
+}
+
+function openAI() {
+  const overlay = document.getElementById('ai-overlay');
+  const body    = document.getElementById('ai-body');
+  document.getElementById('ai-scan-time').textContent = document.querySelector('strong[style*="color:var(--text)"]')?.textContent || '';
+  if (!AI_RAW || AI_RAW === '') {
+    body.innerHTML = '<div class="ai-empty"><span style="font-size:24px">🤖</span><span>尚無 AI 分析資料<br><small style="color:var(--muted)">請確認 GEMINI_API_KEY 已設定於 GitHub Secrets</small></span></div>';
+  } else {
+    body.innerHTML = markdownToHtml(AI_RAW);
+  }
+  overlay.classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeAI() {
+  document.getElementById('ai-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+// 如果沒有 AI 分析資料就隱藏按鈕
+if (!AI_RAW || AI_RAW === '') {
+  const btn = document.getElementById('ai-open-btn');
+  if (btn) btn.style.display = 'none';
+}
+
 // 動態計算 page header 高度，確保 thead sticky 黏在正確位置
 function syncHeaderHeight() {
   const hdr = document.querySelector('header');
@@ -1033,6 +1128,18 @@ window.addEventListener('resize', syncHeaderHeight);
 </script>
 
 <!-- TradingView Modal -->
+<div id="ai-overlay" class="ai-overlay" onclick="if(event.target===this)closeAI()">
+  <div class="ai-modal">
+    <div class="ai-modal-hdr">
+      <span class="ai-modal-title">✦ AI 市場情緒分析</span>
+      <span class="ai-badge">Gemini</span>
+      <span style="font-size:11px;color:var(--muted);margin-left:auto;margin-right:12px" id="ai-scan-time"></span>
+      <button class="tv-close" onclick="closeAI()">✕ 關閉</button>
+    </div>
+    <div class="ai-modal-body" id="ai-body"></div>
+  </div>
+</div>
+
 <div id="tv-overlay" class="tv-overlay" onclick="handleOverlayClick(event)">
   <div class="tv-modal">
     <div class="tv-modal-hdr">
