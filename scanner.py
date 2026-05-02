@@ -1032,11 +1032,13 @@ def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float |
 
     vix_str     = str(vix) if vix is not None else 'null'
     ai_analysis = analyze_with_gemini(results, vix)
+    # 反引號和 ${ 會破壞 JS template literal，需要 escape
+    ai_safe = ai_analysis.replace('\\', '\\\\').replace('`', '\\`').replace('${', '\\${')
     result = (TEMPLATE
               .replace('__SCAN_TIME__', scan_time)
               .replace('__DATA_JSON__', data_json)
               .replace('__VIX_VALUE__', vix_str)
-              .replace('__AI_ANALYSIS__', ai_analysis))
+              .replace('__AI_ANALYSIS__', ai_safe))
     return result
 
 
