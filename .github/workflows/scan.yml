@@ -52,6 +52,8 @@ jobs:
           git add docs/index.html docs/.nojekyll entry_cache.json
           git diff --staged --quiet && echo "Nothing to commit" || (
             git commit -m "scan: $(TZ='America/New_York' date '+%Y-%m-%d %H:%M ET')" &&
+            git fetch origin &&
+            git rebase origin/main &&
             git push
           )
 
