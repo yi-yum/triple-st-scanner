@@ -517,6 +517,8 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
             'short_bal':      None,
             'margin_chg':     None,
             'short_chg':      None,
+            # 近 20 天收盤價（供 sparkline 使用）
+            'close_20d':      [round(float(c), 2) for c in close[-20:]],
         }
     except Exception:
         return None

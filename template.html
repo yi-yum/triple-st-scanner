@@ -223,6 +223,59 @@ table{min-width:1380px}
 .vix-legend{display:flex;justify-content:space-between;font-family:var(--mono);
   font-size:9px;color:var(--muted)}
 .vix-label{font-size:11px;margin-top:8px;font-weight:700}
+
+/* ── Sparkline ── */
+.spark-wrap{display:flex;flex-direction:column;gap:2px}
+.spark-nm{color:var(--text);font-size:12px;max-width:170px;overflow:hidden;text-overflow:ellipsis;opacity:.85}
+.spark svg{display:block;overflow:visible}
+.tick-btn{
+  background:none;border:none;padding:0;cursor:pointer;
+  font-family:var(--mono);font-weight:700;color:var(--green);
+  font-size:13px;letter-spacing:.5px;
+  text-decoration:none;transition:color .15s;
+}
+.tick-btn:hover{color:#fff;text-decoration:underline}
+
+/* ── TradingView Modal ── */
+.tv-overlay{
+  display:none;position:fixed;inset:0;z-index:500;
+  background:rgba(0,0,0,.7);backdrop-filter:blur(4px);
+  align-items:center;justify-content:center;
+}
+.tv-overlay.open{display:flex}
+.tv-modal{
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:12px;overflow:hidden;
+  width:min(1000px,95vw);height:min(640px,85vh);
+  display:flex;flex-direction:column;
+  box-shadow:0 24px 80px rgba(0,0,0,.6);
+}
+.tv-modal-hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 16px;border-bottom:1px solid var(--border);
+  background:var(--bg3);flex-shrink:0;
+}
+.tv-modal-title{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--text)}
+.tv-modal-meta{font-family:var(--mono);font-size:10px;color:var(--muted);margin-left:10px}
+.tv-close{
+  background:none;border:1px solid var(--border2);border-radius:6px;
+  color:var(--muted);cursor:pointer;font-size:13px;
+  padding:4px 10px;transition:all .15s;margin-left:auto;
+}
+.tv-close:hover{color:var(--text);border-color:var(--muted)}
+.tv-body{flex:1;position:relative;overflow:hidden}
+.tv-body iframe,.tv-body #tv_chart_widget,
+.tv-body #tv_chart_widget>*{width:100%;height:100%}
+.tv-loading{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:12px;
+  color:var(--muted);font-family:var(--mono);font-size:11px;
+}
+.tv-spinner{
+  width:28px;height:28px;border:2px solid var(--border2);
+  border-top-color:var(--green);border-radius:50%;
+  animation:spin .7s linear infinite;
+}
 </style>
 </head>
 <body>
@@ -503,6 +556,94 @@ function dot(v) {
   return `<div class="dot ${cls}"></div>`;
 }
 
+// ── Sparkline ──────────────────────────────────────────────────
+function sparkSVG(prices) {
+  if (!prices || prices.length < 2) return '';
+  const W = 80, H = 28, pad = 2;
+  const min = Math.min(...prices), max = Math.max(...prices);
+  const range = max - min || 1;
+  const pts = prices.map((p, i) => {
+    const x = (pad + i / (prices.length - 1) * (W - pad * 2)).toFixed(1);
+    const y = (H - pad - (p - min) / range * (H - pad * 2)).toFixed(1);
+    return `${x},${y}`;
+  }).join(' ');
+  const isUp = prices[prices.length - 1] >= prices[0];
+  const clr  = isUp ? 'var(--green)' : 'var(--red)';
+  const lastX = (pad + (W - pad * 2)).toFixed(1);
+  const lastY = (H - pad - (prices[prices.length-1] - min) / range * (H - pad * 2)).toFixed(1);
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    <polyline points="${pts}" fill="none" stroke="${clr}" stroke-width="1.5" stroke-linejoin="round" opacity=".85"/>
+    <circle cx="${lastX}" cy="${lastY}" r="2" fill="${clr}"/>
+  </svg>`;
+}
+
+// ── TradingView Modal ──────────────────────────────────────────
+let tvLoaded = false;
+
+function tvSymbol(ticker, market) {
+  if (market === 'TW') {
+    if (ticker.endsWith('.TWO')) return 'TPEX:' + ticker.replace('.TWO', '');
+    if (ticker.endsWith('.TW'))  return 'TWSE:' + ticker.replace('.TW', '');
+  }
+  return ticker;
+}
+
+function openChart(ticker, market, name, evt) {
+  if (evt) evt.stopPropagation();
+  const sym = tvSymbol(ticker, market);
+  document.getElementById('tv-title').textContent = ticker;
+  document.getElementById('tv-meta').textContent  = name ? '· ' + name : '';
+  document.getElementById('tv-overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+
+  const widget = document.getElementById('tv_chart_widget');
+  const loading = document.getElementById('tv-loading');
+  widget.style.display = 'none';
+  widget.innerHTML = '';
+  loading.style.display = 'flex';
+
+  const create = () => {
+    widget.style.display = 'block';
+    loading.style.display = 'none';
+    new TradingView.widget({
+      autosize:          true,
+      symbol:            sym,
+      interval:          'D',
+      timezone:          'exchange',
+      theme:             'dark',
+      style:             '1',
+      locale:            'zh_TW',
+      toolbar_bg:        '#0d1420',
+      enable_publishing: false,
+      hide_top_toolbar:  false,
+      studies:           ['STD;Supertrend'],
+      container_id:      'tv_chart_widget',
+    });
+  };
+
+  if (tvLoaded) {
+    create();
+  } else {
+    const s = document.createElement('script');
+    s.src = 'https://s3.tradingview.com/tv.js';
+    s.onload = () => { tvLoaded = true; create(); };
+    s.onerror = () => {
+      loading.innerHTML = '<span style="color:var(--red)">⚠ 無法載入 TradingView（請確認網路連線）</span>';
+    };
+    document.head.appendChild(s);
+  }
+}
+
+function closeChart() {
+  document.getElementById('tv-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+  document.getElementById('tv_chart_widget').innerHTML = '';
+}
+
+function handleOverlayClick(e) {
+  if (e.target === document.getElementById('tv-overlay')) closeChart();
+}
+
 function fmtPrice(r) {
   if (r.currency === 'TWD') return `NT$${r.price.toFixed(r.price >= 10 ? 1 : 2)}`;
   return `$${r.price.toFixed(2)}`;
@@ -603,8 +744,8 @@ function render() {
 
     const vrCls = r.vol_ratio==null?'vr-low':r.vol_ratio>=2?'vr-hot':r.vol_ratio>=1?'vr-ok':'vr-low';
     return `<tr class="${rowCls}">
-      <td><div style="display:flex;gap:5px;align-items:center">${mktBadge}<span class="tick">${r.ticker}</span></div></td>
-      <td><span class="nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,20)}</span></td>
+      <td><div style="display:flex;gap:5px;align-items:center">${mktBadge}<button class="tick-btn" onclick="openChart('${r.ticker}','${r.market||'US'}','${(r.name||'').replace(/'/g,'`')}',event)">${r.ticker}</button></div></td>
+      <td><div class="spark-wrap"><span class="spark-nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,20)}</span><div class="spark">${sparkSVG(r.close_20d)}</div></div></td>
       <td>
         <span class="price">${fmtPrice(r)}</span>
         <span class="ind2 chg ${chgCls}">${chgSign}${r.change_pct.toFixed(2)}%</span>
@@ -878,5 +1019,23 @@ function buildVixPanel() {
     </div>`;
 }
 </script>
+
+<!-- TradingView Modal -->
+<div id="tv-overlay" class="tv-overlay" onclick="handleOverlayClick(event)">
+  <div class="tv-modal">
+    <div class="tv-modal-hdr">
+      <span class="tv-modal-title" id="tv-title">—</span>
+      <span class="tv-modal-meta" id="tv-meta"></span>
+      <button class="tv-close" onclick="closeChart()">✕ 關閉</button>
+    </div>
+    <div class="tv-body" id="tv-body">
+      <div class="tv-loading" id="tv-loading">
+        <div class="tv-spinner"></div>
+        <span>載入 TradingView…</span>
+      </div>
+      <div id="tv_chart_widget" style="width:100%;height:100%;display:none"></div>
+    </div>
+  </div>
+</div>
 </body>
 </html>
