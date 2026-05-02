@@ -988,7 +988,11 @@ VIX 恐慌指數：{vix if vix else '無資料'}
 
         payload = {
             'contents': [{'parts': [{'text': prompt}]}],
-            'generationConfig': {'maxOutputTokens': 1024, 'temperature': 0.4}
+            'generationConfig': {
+                'maxOutputTokens': 2048,
+                'temperature': 0.4,
+                'thinkingConfig': {'thinkingBudget': 0}  # 關閉思考模式，節省 token
+            }
         }
         for model_name in candidates[:3]:
             url = (
