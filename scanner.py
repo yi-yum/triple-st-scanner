@@ -964,20 +964,42 @@ VIX 恐慌指數：{vix if vix else '無資料'}
 
 請用 Markdown 格式輸出，不要加額外說明。"""
 
-        for model_name in ['gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.1-pro', 'gemini-2.5-flash-preview-05-20', 'gemini-2.0-flash']:
+        # 動態取得可用的 flash model
+        list_url = f'https://generativelanguage.googleapis.com/v1beta/models?key={api_key}'
+        list_resp = requests.get(list_url, timeout=30)
+        list_resp.raise_for_status()
+        all_models = list_resp.json().get('models', [])
+        # 優先選 flash（速度快、免費額度多），過濾支援 generateContent 的
+        candidates = [
+            m['name'].replace('models/', '')
+            for m in all_models
+            if 'generateContent' in m.get('supportedGenerationMethods', [])
+            and 'flash' in m['name'].lower()
+            and 'lite' not in m['name'].lower()  # 先排除 lite，畫質較差
+        ]
+        # 若無 flash 則取任何支援 generateContent 的
+        if not candidates:
+            candidates = [
+                m['name'].replace('models/', '')
+                for m in all_models
+                if 'generateContent' in m.get('supportedGenerationMethods', [])
+            ]
+        print(f'  [Gemini] Available flash models: {candidates[:5]}')
+
+        payload = {
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {'maxOutputTokens': 1024, 'temperature': 0.4}
+        }
+        for model_name in candidates[:3]:
             url = (
                 'https://generativelanguage.googleapis.com/v1beta/models/'
                 f'{model_name}:generateContent?key={api_key}'
             )
-            payload = {
-                'contents': [{'parts': [{'text': prompt}]}],
-                'generationConfig': {'maxOutputTokens': 1024, 'temperature': 0.4}
-            }
             try:
                 resp = requests.post(url, json=payload, timeout=60)
                 print(f'  [Gemini] {model_name} status={resp.status_code}')
                 if resp.status_code != 200:
-                    print(f'  [Gemini] response: {resp.text[:300]}')
+                    print(f'  [Gemini] response: {resp.text[:200]}')
                     continue
                 text = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
                 print(f'  [Gemini] Analysis done via {model_name} ({len(text)} chars)')
