@@ -225,14 +225,16 @@ table{min-width:1380px}
 .vix-label{font-size:11px;margin-top:8px;font-weight:700}
 
 /* ── Sparkline ── */
-.spark-wrap{display:flex;flex-direction:column;gap:2px}
-.spark-nm{color:var(--text);font-size:12px;max-width:170px;overflow:hidden;text-overflow:ellipsis;opacity:.85}
+.tick-cell{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
+.tick-row{display:flex;gap:5px;align-items:center}
+.spark{line-height:0}
 .spark svg{display:block;overflow:visible}
 .tick-btn{
+  display:inline-flex;align-items:center;
   background:none;border:none;padding:0;cursor:pointer;
   font-family:var(--mono);font-weight:700;color:var(--green);
   font-size:13px;letter-spacing:.5px;
-  text-decoration:none;transition:color .15s;
+  transition:color .15s;line-height:1;
 }
 .tick-btn:hover{color:#fff;text-decoration:underline}
 
@@ -744,8 +746,8 @@ function render() {
 
     const vrCls = r.vol_ratio==null?'vr-low':r.vol_ratio>=2?'vr-hot':r.vol_ratio>=1?'vr-ok':'vr-low';
     return `<tr class="${rowCls}">
-      <td><div style="display:flex;gap:5px;align-items:center">${mktBadge}<button class="tick-btn" onclick="openChart('${r.ticker}','${r.market||'US'}','${(r.name||'').replace(/'/g,'`')}',event)">${r.ticker}</button></div></td>
-      <td><div class="spark-wrap"><span class="spark-nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,20)}</span><div class="spark">${sparkSVG(r.close_20d)}</div></div></td>
+      <td><div class="tick-cell"><div class="tick-row">${mktBadge}<button class="tick-btn" onclick="openChart('${r.ticker}','${r.market||'US'}','${(r.name||'').replace(/'/g,'`')}',event)">${r.ticker}</button></div><div class="spark">${sparkSVG(r.close_20d)}</div></div></td>
+      <td><span class="nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,20)}</span></td>
       <td>
         <span class="price">${fmtPrice(r)}</span>
         <span class="ind2 chg ${chgCls}">${chgSign}${r.change_pct.toFixed(2)}%</span>
