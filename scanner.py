@@ -964,7 +964,7 @@ VIX 恐慌指數：{vix if vix else '無資料'}
 
 請用 Markdown 格式輸出，不要加額外說明。"""
 
-        for model_name in ['gemini-2.5-flash-preview-05-20', 'gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']:
+        for model_name in ['gemini-3.1-flash-lite', 'gemini-3-flash', 'gemini-3.1-pro', 'gemini-2.5-flash-preview-05-20', 'gemini-2.0-flash']:
             url = (
                 'https://generativelanguage.googleapis.com/v1beta/models/'
                 f'{model_name}:generateContent?key={api_key}'
