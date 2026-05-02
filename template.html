@@ -1020,6 +1020,16 @@ function buildVixPanel() {
       &gt; 35：極度恐慌，潛在反彈區
     </div>`;
 }
+
+// 動態計算 page header 高度，確保 thead sticky 黏在正確位置
+function syncHeaderHeight() {
+  const hdr = document.querySelector('header');
+  if (hdr) {
+    document.documentElement.style.setProperty('--hdr-h', hdr.offsetHeight + 'px');
+  }
+}
+window.addEventListener('load', syncHeaderHeight);
+window.addEventListener('resize', syncHeaderHeight);
 </script>
 
 <!-- TradingView Modal -->
