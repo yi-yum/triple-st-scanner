@@ -1110,10 +1110,10 @@ function closeAI() {
   document.body.style.overflow = '';
 }
 
-// 如果沒有 AI 分析資料就隱藏按鈕
+// 如果沒有 AI 分析資料，按鈕變灰但仍顯示
 if (!AI_RAW || AI_RAW === '') {
   const btn = document.getElementById('ai-open-btn');
-  if (btn) btn.style.display = 'none';
+  if (btn) { btn.style.opacity = '0.45'; btn.title = '尚無 AI 分析（請設定 GEMINI_API_KEY）'; }
 }
 
 // 動態計算 page header 高度，確保 thead sticky 黏在正確位置
