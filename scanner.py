@@ -604,8 +604,7 @@ def download_benchmarks() -> dict:
     bench = {}
     for sym, mkt in [('SPY', 'US'), ('^TWII', 'TW')]:
         try:
-            df = yf.download(sym, period='1y', interval='1d',
-                             auto_adjust=True, progress=False)
+            df = yf.Ticker(sym).history(period='1y', interval='1d', auto_adjust=True)
             if df is None or df.empty:
                 continue
             c = df['Close'].values.astype(float)
@@ -616,12 +615,14 @@ def download_benchmarks() -> dict:
             print(f'  [Benchmark] {sym}: 5d={bench[mkt]["ret_5d"]}%  20d={bench[mkt]["ret_20d"]}%')
         except Exception as e:
             print(f'  [WARN] Benchmark {sym}: {e}')
-    # VIX
+    # VIX — 用 Ticker.history() 避免 MultiIndex 問題
     try:
-        vdf = yf.download('^VIX', period='5d', interval='1d', auto_adjust=True, progress=False)
+        vdf = yf.Ticker('^VIX').history(period='5d', interval='1d', auto_adjust=True)
         if vdf is not None and not vdf.empty:
             bench['vix'] = round(float(vdf['Close'].iloc[-1]), 2)
             print(f'  [Benchmark] ^VIX: {bench["vix"]}')
+        else:
+            bench['vix'] = None
     except Exception as e:
         print(f'  [WARN] VIX: {e}')
         bench['vix'] = None
