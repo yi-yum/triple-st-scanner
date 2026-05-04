@@ -650,10 +650,16 @@ function openChart(ticker, market, name, evt) {
   document.getElementById('tv-overlay').classList.add('open');
   document.body.style.overflow = 'hidden';
 
-  const widget = document.getElementById('tv_chart_widget');
+  const tvBody  = document.getElementById('tv-body');
   const loading = document.getElementById('tv-loading');
-  widget.style.display = 'none';
-  widget.innerHTML = '';
+
+  // 每次開圖都移除舊容器，建立全新的 div，避免 TradingView 重用舊 widget 狀態而退回 AAPL
+  const old = document.getElementById('tv_chart_widget');
+  if (old) old.remove();
+  const widget = document.createElement('div');
+  widget.id = 'tv_chart_widget';
+  widget.style.cssText = 'width:100%;height:100%;display:none';
+  tvBody.appendChild(widget);
   loading.style.display = 'flex';
 
   const create = () => {
@@ -691,7 +697,9 @@ function openChart(ticker, market, name, evt) {
 function closeChart() {
   document.getElementById('tv-overlay').classList.remove('open');
   document.body.style.overflow = '';
-  document.getElementById('tv_chart_widget').innerHTML = '';
+  // 移除 widget 容器；下次 openChart 會重建
+  const w = document.getElementById('tv_chart_widget');
+  if (w) w.remove();
 }
 
 function handleOverlayClick(e) {

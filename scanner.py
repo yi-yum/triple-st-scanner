@@ -922,7 +922,8 @@ def _fetch_us_fundamentals(tickers: list) -> dict:
     _KEY_SETS = {
         'pe':           ['trailingPE', 'trailingP/E'],
         'fwd_pe':       ['forwardPE',  'forwardP/E'],
-        'eps_growth':   ['earningsGrowth', 'earningsQuarterlyGrowth', 'epsTrailingTwelveMonths'],
+        'eps':          ['trailingEps', 'epsTrailingTwelveMonths'],
+        'eps_growth':   ['earningsGrowth', 'earningsQuarterlyGrowth'],
         'rev_growth':   ['revenueGrowth',  'quarterlyRevenueGrowth'],
         'gross_margin': ['grossMargins',   'grossProfitMargins'],
     }
@@ -938,7 +939,7 @@ def _fetch_us_fundamentals(tickers: list) -> dict:
             if t == tickers[0]:
                 filled = {k: v for k, v in info.items() if v is not None and k in
                           ['trailingPE','forwardPE','earningsGrowth','revenueGrowth',
-                           'grossMargins','earningsQuarterlyGrowth','quarterlyRevenueGrowth']}
+                           'grossMargins','trailingEps','epsTrailingTwelveMonths']}
                 print(f'  [Fundamentals] {t} sample keys: {filled}')
 
             def pick(keys):
@@ -950,12 +951,28 @@ def _fetch_us_fundamentals(tickers: list) -> dict:
 
             pe_val  = pick(_KEY_SETS['pe'])
             fpe_val = pick(_KEY_SETS['fwd_pe'])
+            eps_val = pick(_KEY_SETS['eps'])
             eg_val  = pick(_KEY_SETS['eps_growth'])
             rg_val  = pick(_KEY_SETS['rev_growth'])
             gm_val  = pick(_KEY_SETS['gross_margin'])
 
+            # PE 不可用時：若 EPS 為負表示虧損，給出明確說明而非空白
+            if pe_val is not None:
+                pe_str = num(pe_val)
+            elif eps_val is not None and eps_val < 0:
+                pe_str = f'虧損中(EPS={eps_val:.2f})'
+            elif eps_val is not None:
+                # EPS > 0 但 PE 抓不到（罕見），嘗試從現價推算
+                cur_price = info.get('currentPrice') or info.get('regularMarketPrice')
+                if cur_price and eps_val > 0:
+                    pe_str = f'{cur_price/eps_val:.1f}(估)'
+                else:
+                    pe_str = '—'
+            else:
+                pe_str = '—'
+
             result[t] = {
-                'pe':           num(pe_val),
+                'pe':           pe_str,
                 'fwd_pe':       num(fpe_val),
                 'eps_growth':   pct(eg_val)  if eg_val  and abs(eg_val) < 100 else '—',
                 'rev_growth':   pct(rg_val)  if rg_val  and abs(rg_val) < 100 else '—',
@@ -1004,13 +1021,21 @@ def analyze_with_gemini(results: list, vix: float | None) -> str:
         # ── 台股：整理籌碼面 ──
         def fmt_tw(lst):
             rows = []
+            def m(v):
+                """將張數格式化為可讀字串（帶正負號）"""
+                if v is None: return '—'
+                if v == 0: return '持平'
+                sign = '+' if v > 0 else ''
+                av = abs(v)
+                if av >= 10000: return f'{sign}{v/10000:.1f}萬張'
+                if av >= 1000:  return f'{sign}{v/1000:.1f}K張'
+                return f'{sign}{v}張'
             for r in lst[:20]:
-                def m(v): return f"{v/1e8:.1f}億" if v else '—'
                 rows.append(
                     f"  {r['ticker']} ({r.get('sector','?')}) "
                     f"外資{m(r.get('foreign_net'))} 投信{m(r.get('trust_net'))} 自營{m(r.get('dealer_net'))} "
                     f"法人{'買超' if r.get('inst_buy') else ('賣超' if r.get('inst_sell') else '—')} "
-                    f"融資變化{r.get('margin_chg') or '—'} 融券變化{r.get('short_chg') or '—'}"
+                    f"融資變化{m(r.get('margin_chg'))} 融券變化{m(r.get('short_chg'))}"
                 )
             return '\n'.join(rows) if rows else '  （無）'
 
