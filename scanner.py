@@ -705,9 +705,30 @@ def _chip_int(v) -> int | None:
 
 def fetch_chip_institutional() -> dict:
     """
-    三大法人買賣超（上市 T86 + 上櫃 OpenAPI）
+    三大法人買賣超（上市 T86 + 上櫃 web scraping）
     回傳 {stock_code: {foreign_net, trust_net, dealer_net, inst_total, inst_buy, inst_sell}}
     單位：張 (已除以 1000)
+
+    T86 欄位結構（2025 版）：
+      [0]  證券代號
+      [1]  證券名稱
+      [2]  外陸資買進股數(不含外資自營商)
+      [3]  外陸資賣出股數(不含外資自營商)
+      [4]  外陸資買賣超股數(不含外資自營商)   ← fi_foreign_excl
+      [5]  外資自營商買進股數
+      [6]  外資自營商賣出股數
+      [7]  外資自營商買賣超股數               ← fi_foreign_dealer
+      [8]  投信買進股數
+      [9]  投信賣出股數
+      [10] 投信買賣超股數                     ← fi_trust
+      [11] 自營商買賣超股數（合計）            ← fi_dealer
+      [12] 自營商買進股數(自行買賣)
+      [13] 自營商賣出股數(自行買賣)
+      [14] 自營商買賣超股數(自行買賣)
+      [15] 自營商買進股數(避險)
+      [16] 自營商賣出股數(避險)
+      [17] 自營商買賣超股數(避險)
+      [18] 三大法人買賣超股數                 ← fi_inst
     """
     result = {}
     date_str = _chip_date()
@@ -723,36 +744,51 @@ def fetch_chip_institutional() -> dict:
         rows   = jd.get('data',   [])
 
         if fields and rows:
-            def _fi(kw):
+            def _fi(kw, exclude=None):
                 for i, f in enumerate(fields):
                     if kw in f:
+                        if exclude and any(ex in f for ex in exclude):
+                            continue
                         return i
                 return -1
 
-            fi_code    = _fi('代號')
-            fi_foreign = _fi('外資及陸資買賣超')
-            fi_trust   = _fi('投信買賣超')
-            fi_dealer  = max(
-                [i for i, f in enumerate(fields) if '自營商買賣超' in f],
-                default=_fi('自營商買賣超')
-            )
-            fi_inst = _fi('三大法人買賣超')
+            fi_code = _fi('代號')
 
-            # fallback 位置（T86 欄位順序通常固定）
-            if fi_code    < 0: fi_code    = 0
-            if fi_foreign < 0: fi_foreign = 8
-            if fi_trust   < 0: fi_trust   = 11
-            if fi_dealer  < 0: fi_dealer  = 14
-            if fi_inst    < 0: fi_inst    = 15
+            # 外資合計 = 外陸資不含自營商(index 4) + 外資自營商(index 7)
+            # 用個別欄位相加，若找不到才用固定 fallback
+            fi_foreign_excl   = _fi('外陸資買賣超')          # index 4
+            fi_foreign_dealer = _fi('外資自營商買賣超')       # index 7
+
+            fi_trust  = _fi('投信買賣超')                    # index 10
+
+            # 自營商合計：排除 外資自營商、自行買賣、避險 等子欄位，取 index 11 的總計欄
+            fi_dealer = _fi('自營商買賣超', exclude=['外資', '自行買賣', '避險'])  # index 11
+
+            fi_inst = _fi('三大法人買賣超')                  # index 18
+
+            # 正確 fallback（依 2025 TWSE T86 欄位順序）
+            if fi_code           < 0: fi_code           = 0
+            if fi_foreign_excl   < 0: fi_foreign_excl   = 4
+            if fi_foreign_dealer < 0: fi_foreign_dealer = 7
+            if fi_trust          < 0: fi_trust          = 10
+            if fi_dealer         < 0: fi_dealer         = 11
+            if fi_inst           < 0: fi_inst           = 18
 
             for row in rows:
                 code = str(row[fi_code]).strip()
                 if not code.isdigit() or len(code) != 4:
                     continue
-                fn = _chip_int(row[fi_foreign]) if fi_foreign < len(row) else None
-                tn = _chip_int(row[fi_trust])   if fi_trust   < len(row) else None
-                dn = _chip_int(row[fi_dealer])  if fi_dealer  < len(row) else None
-                it = _chip_int(row[fi_inst])    if fi_inst    < len(row) else None
+                fn_excl   = _chip_int(row[fi_foreign_excl])   if fi_foreign_excl   < len(row) else None
+                fn_dealer = _chip_int(row[fi_foreign_dealer]) if fi_foreign_dealer < len(row) else None
+                tn = _chip_int(row[fi_trust])  if fi_trust  < len(row) else None
+                dn = _chip_int(row[fi_dealer]) if fi_dealer < len(row) else None
+                it = _chip_int(row[fi_inst])   if fi_inst   < len(row) else None
+
+                # 外資合計 = 不含自營商 + 外資自營商
+                fn = None
+                if fn_excl is not None or fn_dealer is not None:
+                    fn = (fn_excl or 0) + (fn_dealer or 0)
+
                 result[code] = {
                     'foreign_net': fn // 1000 if fn is not None else None,
                     'trust_net':   tn // 1000 if tn is not None else None,
@@ -763,33 +799,49 @@ def fetch_chip_institutional() -> dict:
     except Exception as e:
         print(f'  [WARN] TWSE T86: {e}')
 
-    # ─ 上櫃 TPEx OpenAPI ─
+    # ─ 上櫃 TPEx（web scraping 備援）─
+    # TPEx OpenAPI (openapi/v1) 目前回傳 HTML，改用 web 查詢介面
     try:
-        url  = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_institution_trade'
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
+        date_slash = datetime.strptime(date_str, '%Y%m%d').strftime('%Y/%m/%d')
+        url = (
+            f'https://www.tpex.org.tw/web/stock/3insti/daily_trade/'
+            f'3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D'
+            f'&d={date_slash}&s=0,asc'
+        )
+        tpex_headers = {**_HEADERS,
+                        'Accept': 'application/json, text/javascript, */*; q=0.01',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Referer': 'https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge.php?l=zh-tw'}
+        resp = requests.get(url, headers=tpex_headers, timeout=30)
         resp.raise_for_status()
+        jd   = resp.json()
+        rows = jd.get('aaData', [])
+        # aaData 欄位：[代號, 名稱, 外資買進, 外資賣出, 外資買賣超,
+        #               投信買進, 投信賣出, 投信買賣超,
+        #               自營商買進, 自營商賣出, 自營商買賣超,
+        #               三大法人買賣超]
         tpex_cnt = 0
-        for item in resp.json():
-            code = str(item.get('SecuritiesCompanyCode', '')).strip()
-            if not code.isdigit() or len(code) != 4:
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                if not code.isdigit() or len(code) != 4:
+                    continue
+                fn = _chip_int(row[4])   # 外資買賣超
+                tn = _chip_int(row[7])   # 投信買賣超
+                dn = _chip_int(row[10])  # 自營商買賣超
+                it = _chip_int(row[11])  # 三大法人買賣超
+                result[code] = {
+                    'foreign_net': fn // 1000 if fn is not None else None,
+                    'trust_net':   tn // 1000 if tn is not None else None,
+                    'dealer_net':  dn // 1000 if dn is not None else None,
+                    'inst_total':  it // 1000 if it is not None else None,
+                }
+                tpex_cnt += 1
+            except (IndexError, Exception):
                 continue
-            fb = _chip_int(item.get('ForeignInvestorBuy',  0)) or 0
-            fs = _chip_int(item.get('ForeignInvestorSell', 0)) or 0
-            tb = _chip_int(item.get('InvestmentTrustBuy',  0)) or 0
-            ts = _chip_int(item.get('InvestmentTrustSell', 0)) or 0
-            db = _chip_int(item.get('DealerBuy',  0)) or 0
-            ds = _chip_int(item.get('DealerSell', 0)) or 0
-            fn, tn, dn = fb - fs, tb - ts, db - ds
-            result[code] = {
-                'foreign_net': fn // 1000,
-                'trust_net':   tn // 1000,
-                'dealer_net':  dn // 1000,
-                'inst_total':  (fn + tn + dn) // 1000,
-            }
-            tpex_cnt += 1
         print(f'  [Chip] TPEx Institution: {tpex_cnt} stocks')
     except Exception as e:
-        print(f'  [WARN] TPEx Institution: {e}')
+        print(f'  [WARN] TPEx Institution (web): {e}')
 
     # 衍生：外資+投信同向訊號
     for d in result.values():
@@ -803,9 +855,18 @@ def fetch_chip_institutional() -> dict:
 
 def fetch_chip_margin() -> dict:
     """
-    融資融券餘額（上市 MI_MARGN + 上櫃 OpenAPI）
+    融資融券餘額（上市 MI_MARGN + 上櫃 web scraping）
     回傳 {stock_code: {margin_bal, short_bal, margin_chg, short_chg}}
     單位：張
+
+    MI_MARGN 回應結構（2025 版）：
+      jd['tables'][1]['data'] 才是個股資料（非 jd['data']）
+      欄位：[0]=代號 [1]=名稱
+            [2]=融資買進  [3]=融資賣出  [4]=融資現金償還
+            [5]=融資前日餘額  [6]=融資今日餘額  [7]=次一營業日限額(融資)
+            [8]=融券買進  [9]=融券賣出  [10]=融券現券償還
+            [11]=融券前日餘額 [12]=融券今日餘額 [13]=次一營業日限額(融券)
+            [14]=資券互抵  [15]=註記
     """
     result   = {}
     date_str = _chip_date()
@@ -816,21 +877,29 @@ def fetch_chip_margin() -> dict:
                f'?date={date_str}&selectType=ALL&response=json')
         resp = requests.get(url, headers=_HEADERS, timeout=30)
         resp.raise_for_status()
-        jd   = resp.json()
-        rows = jd.get('data', [])
+        jd = resp.json()
+
+        # 2025 版：個股資料在 tables[1]['data']，不是頂層 data
+        tables = jd.get('tables', [])
+        if len(tables) >= 2:
+            rows = tables[1].get('data', [])
+        else:
+            rows = jd.get('data', [])   # 舊格式相容
+
         for row in rows:
             try:
                 code = str(row[0]).strip()
                 if not code.isdigit() or len(code) != 4:
                     continue
-                # 欄位位置(固定): 0=代號 2=融資買進 3=融資賣出 5=融資餘額
-                #                 7=融券賣出 8=融券買進 10=融券餘額
+                # 欄位位置（對應 2025 MI_MARGN tables[1]）:
+                #   [2]=融資買進  [3]=融資賣出  [6]=融資今日餘額
+                #   [8]=融券買進  [9]=融券賣出  [12]=融券今日餘額
                 mb  = _chip_int(row[2])
                 ms  = _chip_int(row[3])
-                mbl = _chip_int(row[5])
-                ss  = _chip_int(row[7])
+                mbl = _chip_int(row[6])
                 sb  = _chip_int(row[8])
-                sbl = _chip_int(row[10])
+                ss  = _chip_int(row[9])
+                sbl = _chip_int(row[12])
                 result[code] = {
                     'margin_bal': mbl,
                     'short_bal':  sbl,
@@ -843,32 +912,51 @@ def fetch_chip_margin() -> dict:
     except Exception as e:
         print(f'  [WARN] TWSE MI_MARGN: {e}')
 
-    # ─ 上櫃 TPEx OpenAPI ─
+    # ─ 上櫃 TPEx（web scraping 備援）─
+    # TPEx OpenAPI (openapi/v1) 目前回傳 HTML，改用 web 查詢介面
     try:
-        url  = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_margin_trades'
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
+        date_slash = datetime.strptime(date_str, '%Y%m%d').strftime('%Y/%m/%d')
+        url = (
+            f'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/'
+            f'margin_bal_result.php?l=zh-tw&o=json&s=0,asc'
+            f'&d={date_slash}&c=&t=D'
+        )
+        tpex_headers = {**_HEADERS,
+                        'Accept': 'application/json, text/javascript, */*; q=0.01',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Referer': 'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal.php?l=zh-tw'}
+        resp = requests.get(url, headers=tpex_headers, timeout=30)
         resp.raise_for_status()
+        jd   = resp.json()
+        rows = jd.get('aaData', [])
+        # aaData 欄位：[代號, 名稱, 融資買進, 融資賣出, 融資現金償還,
+        #               融資前日餘額, 融資今日餘額, 融資次日限額,
+        #               融券賣出, 融券買進, 融券現券償還,
+        #               融券前日餘額, 融券今日餘額, 融券次日限額, 資券互抵]
         tpex_cnt = 0
-        for item in resp.json():
-            code = str(item.get('SecuritiesCompanyCode', '')).strip()
-            if not code.isdigit() or len(code) != 4:
+        for row in rows:
+            try:
+                code = str(row[0]).strip()
+                if not code.isdigit() or len(code) != 4:
+                    continue
+                mb  = _chip_int(row[2])   # 融資買進
+                ms  = _chip_int(row[3])   # 融資賣出
+                mbl = _chip_int(row[6])   # 融資今日餘額
+                ss  = _chip_int(row[8])   # 融券賣出
+                sb  = _chip_int(row[9])   # 融券買進
+                sbl = _chip_int(row[12])  # 融券今日餘額
+                result[code] = {
+                    'margin_bal': mbl,
+                    'short_bal':  sbl,
+                    'margin_chg': (mb - ms) if mb is not None and ms is not None else None,
+                    'short_chg':  (ss - sb) if ss is not None and sb is not None else None,
+                }
+                tpex_cnt += 1
+            except (IndexError, Exception):
                 continue
-            mb  = _chip_int(item.get('MarginPurchaseBuy',     0)) or 0
-            ms  = _chip_int(item.get('MarginPurchaseSell',    0)) or 0
-            mbl = _chip_int(item.get('MarginPurchaseBalance', None))
-            ss  = _chip_int(item.get('ShortSaleSell',         0)) or 0
-            sb  = _chip_int(item.get('ShortSaleBuy',          0)) or 0
-            sbl = _chip_int(item.get('ShortSaleBalance',      None))
-            result[code] = {
-                'margin_bal': mbl,
-                'short_bal':  sbl,
-                'margin_chg': mb - ms,
-                'short_chg':  ss - sb,
-            }
-            tpex_cnt += 1
         print(f'  [Chip] TPEx Margin: {tpex_cnt} stocks')
     except Exception as e:
-        print(f'  [WARN] TPEx Margin: {e}')
+        print(f'  [WARN] TPEx Margin (web): {e}')
 
     return result
 
