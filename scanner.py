@@ -799,49 +799,72 @@ def fetch_chip_institutional() -> dict:
     except Exception as e:
         print(f'  [WARN] TWSE T86: {e}')
 
-    # ─ 上櫃 TPEx（web scraping 備援）─
-    # TPEx OpenAPI (openapi/v1) 目前回傳 HTML，改用 web 查詢介面
-    try:
-        date_slash = datetime.strptime(date_str, '%Y%m%d').strftime('%Y/%m/%d')
-        url = (
-            f'https://www.tpex.org.tw/web/stock/3insti/daily_trade/'
-            f'3itrade_hedge_result.php?l=zh-tw&o=json&se=EW&t=D'
-            f'&d={date_slash}&s=0,asc'
-        )
-        tpex_headers = {**_HEADERS,
-                        'Accept': 'application/json, text/javascript, */*; q=0.01',
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Referer': 'https://www.tpex.org.tw/web/stock/3insti/daily_trade/3itrade_hedge.php?l=zh-tw'}
-        resp = requests.get(url, headers=tpex_headers, timeout=30)
-        resp.raise_for_status()
-        jd   = resp.json()
-        rows = jd.get('aaData', [])
-        # aaData 欄位：[代號, 名稱, 外資買進, 外資賣出, 外資買賣超,
-        #               投信買進, 投信賣出, 投信買賣超,
-        #               自營商買進, 自營商賣出, 自營商買賣超,
-        #               三大法人買賣超]
-        tpex_cnt = 0
-        for row in rows:
-            try:
-                code = str(row[0]).strip()
+    # ─ 上櫃 TPEx — FinMind API ─
+    # FinMind 全球可存取，覆蓋上市+上櫃，這裡只補上 TWSE T86 未含的上櫃股票
+    # 需設定環境變數 FINMIND_TOKEN（免費版每日 600 次）
+    finmind_token = os.environ.get('FINMIND_TOKEN', '')
+    if finmind_token:
+        try:
+            from collections import defaultdict
+            date_iso = datetime.strptime(date_str, '%Y%m%d').strftime('%Y-%m-%d')
+            url = 'https://api.finmindtrade.com/api/v4/data'
+            params = {
+                'dataset':    'TaiwanStockInstitutionalInvestorsBuySell',
+                'start_date': date_iso,
+                'end_date':   date_iso,
+                'token':      finmind_token,
+            }
+            resp = requests.get(url, params=params, headers=_HEADERS, timeout=40)
+            resp.raise_for_status()
+            jd = resp.json()
+            if jd.get('status') != 200:
+                raise ValueError(f'FinMind status={jd.get("status")} msg={jd.get("msg")}')
+
+            # 依 stock_id 彙整各類法人（buy/sell 單位：股，÷1000 → 張）
+            fm_data: dict = defaultdict(lambda: {
+                'foreign': 0, 'trust': 0,
+                'dealer': 0,  'has_dealer_total': False,
+                'dealer_sub': 0,
+            })
+            for row in jd.get('data', []):
+                code = str(row.get('stock_id', '')).strip()
                 if not code.isdigit() or len(code) != 4:
                     continue
-                fn = _chip_int(row[4])   # 外資買賣超
-                tn = _chip_int(row[7])   # 投信買賣超
-                dn = _chip_int(row[10])  # 自營商買賣超
-                it = _chip_int(row[11])  # 三大法人買賣超
+                if code in result:          # 已由 TWSE T86 涵蓋，跳過
+                    continue
+                investor = row.get('name', '')
+                buy  = _chip_int(row.get('buy',  0)) or 0
+                sell = _chip_int(row.get('sell', 0)) or 0
+                net  = buy - sell
+                d    = fm_data[code]
+                if investor in ('Foreign_Investor', 'Foreign_Dealer_Self'):
+                    d['foreign'] += net
+                elif investor == 'Investment_Trust':
+                    d['trust'] = net
+                elif investor == 'Dealer':
+                    d['dealer'] = net
+                    d['has_dealer_total'] = True
+                elif investor in ('Dealer_Self', 'Dealer_Hedging'):
+                    d['dealer_sub'] += net   # 備用：若無 Dealer 總計欄
+
+            tpex_cnt = 0
+            for code, d in fm_data.items():
+                fn = d['foreign']
+                tn = d['trust']
+                dn = d['dealer'] if d['has_dealer_total'] else d['dealer_sub']
+                it = fn + tn + dn
                 result[code] = {
-                    'foreign_net': fn // 1000 if fn is not None else None,
-                    'trust_net':   tn // 1000 if tn is not None else None,
-                    'dealer_net':  dn // 1000 if dn is not None else None,
-                    'inst_total':  it // 1000 if it is not None else None,
+                    'foreign_net': fn // 1000,
+                    'trust_net':   tn // 1000,
+                    'dealer_net':  dn // 1000,
+                    'inst_total':  it // 1000,
                 }
                 tpex_cnt += 1
-            except (IndexError, Exception):
-                continue
-        print(f'  [Chip] TPEx Institution: {tpex_cnt} stocks')
-    except Exception as e:
-        print(f'  [WARN] TPEx Institution (web): {e}')
+            print(f'  [Chip] FinMind TPEx Institution: {tpex_cnt} stocks  (date={date_iso})')
+        except Exception as e:
+            print(f'  [WARN] FinMind Institution: {e}')
+    else:
+        print('  [INFO] FINMIND_TOKEN not set; TPEx institution chip skipped')
 
     # 衍生：外資+投信同向訊號
     for d in result.values():
@@ -912,51 +935,50 @@ def fetch_chip_margin() -> dict:
     except Exception as e:
         print(f'  [WARN] TWSE MI_MARGN: {e}')
 
-    # ─ 上櫃 TPEx（web scraping 備援）─
-    # TPEx OpenAPI (openapi/v1) 目前回傳 HTML，改用 web 查詢介面
-    try:
-        date_slash = datetime.strptime(date_str, '%Y%m%d').strftime('%Y/%m/%d')
-        url = (
-            f'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/'
-            f'margin_bal_result.php?l=zh-tw&o=json&s=0,asc'
-            f'&d={date_slash}&c=&t=D'
-        )
-        tpex_headers = {**_HEADERS,
-                        'Accept': 'application/json, text/javascript, */*; q=0.01',
-                        'X-Requested-With': 'XMLHttpRequest',
-                        'Referer': 'https://www.tpex.org.tw/web/stock/margin_trading/margin_balance/margin_bal.php?l=zh-tw'}
-        resp = requests.get(url, headers=tpex_headers, timeout=30)
-        resp.raise_for_status()
-        jd   = resp.json()
-        rows = jd.get('aaData', [])
-        # aaData 欄位：[代號, 名稱, 融資買進, 融資賣出, 融資現金償還,
-        #               融資前日餘額, 融資今日餘額, 融資次日限額,
-        #               融券賣出, 融券買進, 融券現券償還,
-        #               融券前日餘額, 融券今日餘額, 融券次日限額, 資券互抵]
-        tpex_cnt = 0
-        for row in rows:
-            try:
-                code = str(row[0]).strip()
+    # ─ 上櫃 TPEx — FinMind API ─
+    # TaiwanStockMarginPurchaseShortSale：欄位單位為「張」，不需再 ÷1000
+    finmind_token = os.environ.get('FINMIND_TOKEN', '')
+    if finmind_token:
+        try:
+            date_iso = datetime.strptime(date_str, '%Y%m%d').strftime('%Y-%m-%d')
+            url = 'https://api.finmindtrade.com/api/v4/data'
+            params = {
+                'dataset':    'TaiwanStockMarginPurchaseShortSale',
+                'start_date': date_iso,
+                'end_date':   date_iso,
+                'token':      finmind_token,
+            }
+            resp = requests.get(url, params=params, headers=_HEADERS, timeout=40)
+            resp.raise_for_status()
+            jd = resp.json()
+            if jd.get('status') != 200:
+                raise ValueError(f'FinMind status={jd.get("status")} msg={jd.get("msg")}')
+
+            tpex_cnt = 0
+            for row in jd.get('data', []):
+                code = str(row.get('stock_id', '')).strip()
                 if not code.isdigit() or len(code) != 4:
                     continue
-                mb  = _chip_int(row[2])   # 融資買進
-                ms  = _chip_int(row[3])   # 融資賣出
-                mbl = _chip_int(row[6])   # 融資今日餘額
-                ss  = _chip_int(row[8])   # 融券賣出
-                sb  = _chip_int(row[9])   # 融券買進
-                sbl = _chip_int(row[12])  # 融券今日餘額
+                if code in result:      # 已由 TWSE MI_MARGN 涵蓋，跳過
+                    continue
+                mb  = _chip_int(row.get('MarginPurchaseBuy',         0)) or 0
+                ms  = _chip_int(row.get('MarginPurchaseSell',        0)) or 0
+                mbl = _chip_int(row.get('MarginPurchaseTodayBalance', None))
+                sb  = _chip_int(row.get('ShortSaleBuy',              0)) or 0
+                ss  = _chip_int(row.get('ShortSaleSell',             0)) or 0
+                sbl = _chip_int(row.get('ShortSaleTodayBalance',     None))
                 result[code] = {
                     'margin_bal': mbl,
                     'short_bal':  sbl,
-                    'margin_chg': (mb - ms) if mb is not None and ms is not None else None,
-                    'short_chg':  (ss - sb) if ss is not None and sb is not None else None,
+                    'margin_chg': mb - ms,
+                    'short_chg':  ss - sb,
                 }
                 tpex_cnt += 1
-            except (IndexError, Exception):
-                continue
-        print(f'  [Chip] TPEx Margin: {tpex_cnt} stocks')
-    except Exception as e:
-        print(f'  [WARN] TPEx Margin (web): {e}')
+            print(f'  [Chip] FinMind TPEx Margin: {tpex_cnt} stocks  (date={date_iso})')
+        except Exception as e:
+            print(f'  [WARN] FinMind Margin: {e}')
+    else:
+        print('  [INFO] FINMIND_TOKEN not set; TPEx margin chip skipped')
 
     return result
 

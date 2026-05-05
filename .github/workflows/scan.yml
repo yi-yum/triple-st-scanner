@@ -38,6 +38,7 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          FINMIND_TOKEN:  ${{ secrets.FINMIND_TOKEN }}
 
       - name: Copy result to docs/
         run: |
