@@ -327,6 +327,71 @@ table{min-width:1380px}
   border-top-color:var(--green);border-radius:50%;
   animation:spin .7s linear infinite;
 }
+
+/* ── Chat FAB & Panel ── */
+#chat-fab{
+  position:fixed;bottom:28px;right:28px;z-index:1100;
+  width:52px;height:52px;border-radius:50%;border:none;cursor:pointer;
+  background:var(--green);color:#0d1420;font-size:22px;
+  box-shadow:0 4px 16px rgba(0,0,0,.5);
+  transition:transform .15s,box-shadow .15s;
+}
+#chat-fab:hover{transform:scale(1.08);box-shadow:0 6px 20px rgba(0,0,0,.6)}
+#chat-panel{
+  position:fixed;bottom:92px;right:28px;z-index:1100;
+  width:400px;max-height:72vh;
+  background:var(--card);border:1px solid var(--border2);border-radius:12px;
+  display:none;flex-direction:column;overflow:hidden;
+  box-shadow:0 8px 32px rgba(0,0,0,.55);
+}
+#chat-panel.open{display:flex}
+#chat-hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;border-bottom:1px solid var(--border2);
+  background:rgba(255,255,255,.03);flex-shrink:0;
+}
+.chat-icon-btn{
+  background:none;border:1px solid var(--border2);border-radius:5px;
+  color:var(--muted);font-size:12px;padding:3px 7px;cursor:pointer;
+  transition:color .15s,border-color .15s;
+}
+.chat-icon-btn:hover{color:var(--text);border-color:var(--muted)}
+#chat-messages{
+  flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;
+  font-size:12.5px;line-height:1.6;
+}
+.chat-msg{max-width:90%;padding:8px 12px;border-radius:8px;word-break:break-word}
+.chat-msg.user{
+  align-self:flex-end;background:rgba(0,200,100,.15);
+  border:1px solid rgba(0,200,100,.25);color:var(--text);
+}
+.chat-msg.assistant{
+  align-self:flex-start;background:rgba(255,255,255,.05);
+  border:1px solid var(--border2);color:var(--text);
+}
+.chat-msg.pending{color:var(--muted);font-style:italic}
+.chat-msg strong{color:var(--green)}
+.chat-msg .chat-h2{
+  color:var(--yellow);font-weight:700;font-size:12px;
+  display:block;margin:6px 0 2px;
+}
+#chat-input-wrap{
+  display:flex;gap:8px;padding:10px 12px;
+  border-top:1px solid var(--border2);flex-shrink:0;
+}
+#chat-input{
+  flex:1;background:var(--input-bg);border:1px solid var(--border2);border-radius:6px;
+  color:var(--text);font-size:12px;padding:7px 9px;resize:none;
+  font-family:inherit;line-height:1.4;
+}
+#chat-input:focus{outline:none;border-color:var(--green)}
+#chat-send-btn{
+  background:var(--green);color:#0d1420;border:none;border-radius:6px;
+  font-size:12px;font-weight:600;padding:0 14px;cursor:pointer;
+  transition:opacity .15s;white-space:nowrap;
+}
+#chat-send-btn:hover{opacity:.85}
+#chat-send-btn:disabled{opacity:.4;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -1157,6 +1222,148 @@ function syncHeaderHeight() {
 }
 window.addEventListener('load', syncHeaderHeight);
 window.addEventListener('resize', syncHeaderHeight);
+
+// ══════════════════════════════════════════════════════════════
+// CHAT — AI 股票助理
+// ══════════════════════════════════════════════════════════════
+const GEMINI_CHAT_MODEL = 'gemini-2.0-flash';
+let chatHistory = [];   // {role, parts:[{text}]}
+let chatCtx     = null; // system prompt (建立一次)
+
+// 把掃描資料濃縮成 system prompt context
+function buildChatCtx() {
+  const allGreen = RAW.filter(r => r.all_green);
+  const usGreen  = allGreen.filter(r => r.market === 'US');
+  const twGreen  = allGreen.filter(r => r.market === 'TW');
+
+  const fmt = n => (n != null ? n : '—');
+  const fmtZ = (v, unit='張') => v == null ? '—' : `${v > 0 ? '+' : ''}${v}${unit}`;
+
+  let ctx = `你是一位專業台美股分析助理。今日掃描資料（__SCAN_TIME__）：\n`;
+  ctx += `VIX=${fmt(VIX)} | 全綠${allGreen.length}支（美${usGreen.length}/台${twGreen.length}）\n\n`;
+
+  if (usGreen.length) {
+    ctx += `【美股全綠 ${usGreen.length}支】\n`;
+    usGreen.forEach(r => {
+      ctx += `${r.ticker}(${r.sector||'?'}) $${r.price} RSI=${fmt(r.rsi)} ADX=${fmt(r.adx)} RS超額=${fmtZ(r.rs_20d,'%')} 5d=${fmtZ(r.ret_5d,'%')}\n`;
+    });
+    ctx += '\n';
+  }
+  if (twGreen.length) {
+    ctx += `【台股全綠 ${twGreen.length}支】\n`;
+    twGreen.forEach(r => {
+      ctx += `${r.ticker}${r.name?'('+r.name+')':''} ${r.price}元 外資${fmtZ(r.foreign_net,'張')} 投信${fmtZ(r.trust_net,'張')} 自營${fmtZ(r.dealer_net,'張')} 融資變${fmtZ(r.margin_chg,'張')}\n`;
+    });
+    ctx += '\n';
+  }
+
+  // 也附上「部分全綠」供參考（只給代號）
+  const partial = RAW.filter(r => !r.all_green && (r.st1===1||r.st2===1||r.st3===1));
+  if (partial.length) {
+    ctx += `【部分綠 ${partial.length}支（非全綠，僅代號）】\n`;
+    ctx += partial.map(r => r.ticker).join(', ') + '\n\n';
+  }
+
+  ctx += `請根據上述資料用繁體中文回答問題。可直接查詢個股數據。若資料不足請如實說明。`;
+  return ctx;
+}
+
+function toggleChat() {
+  const panel = document.getElementById('chat-panel');
+  const isOpen = panel.classList.toggle('open');
+  if (isOpen && !chatCtx) {
+    chatCtx = buildChatCtx();
+    if (chatHistory.length === 0) {
+      appendChatMsg('assistant',
+        `你好！我可以幫你分析今日掃描結果。\n目前全綠：**${RAW.filter(r=>r.all_green).length}支**（美股 ${RAW.filter(r=>r.all_green&&r.market==='US').length} / 台股 ${RAW.filter(r=>r.all_green&&r.market==='TW').length}）\n\n請輸入問題，例如：\n• 台股今日籌碼最強的是哪幾支？\n• NVDA 目前技術面如何？\n• 幫我列出法人連買的台股`
+      );
+    }
+  }
+}
+
+function chatSetKey() {
+  const cur = localStorage.getItem('gemini_chat_key') || '';
+  const key = prompt('輸入 Gemini API Key（儲存於瀏覽器 localStorage，不會上傳）：', cur);
+  if (key !== null) {
+    localStorage.setItem('gemini_chat_key', key.trim());
+    alert(key.trim() ? '✅ API Key 已儲存' : '🗑 已清除 API Key');
+  }
+}
+
+function clearChat() {
+  chatHistory = [];
+  document.getElementById('chat-messages').innerHTML = '';
+  chatCtx = null;
+  appendChatMsg('assistant', '對話已清除。');
+}
+
+// 簡易 markdown → html（聊天用）
+function chatMd(text) {
+  return text
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/^## (.+)$/gm,'<span class="chat-h2">$1</span>')
+    .replace(/^### (.+)$/gm,'<strong>$1</strong><br>')
+    .replace(/^[-•]\s(.+)$/gm,'&nbsp;• $1')
+    .replace(/\n/g,'<br>');
+}
+
+function appendChatMsg(role, text, id) {
+  const el = document.createElement('div');
+  el.className = `chat-msg ${role}${id ? ' '+id : ''}`;
+  el.innerHTML = role === 'assistant' ? chatMd(text) : text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  if (id) el.dataset.msgId = id;
+  document.getElementById('chat-messages').appendChild(el);
+  el.scrollIntoView({behavior:'smooth', block:'end'});
+  return el;
+}
+
+async function sendChat() {
+  const apiKey = localStorage.getItem('gemini_chat_key') || '';
+  if (!apiKey) {
+    const k = prompt('請先輸入 Gemini API Key（儲存於瀏覽器 localStorage）：');
+    if (!k) return;
+    localStorage.setItem('gemini_chat_key', k.trim());
+  }
+  const key  = localStorage.getItem('gemini_chat_key');
+  const inp  = document.getElementById('chat-input');
+  const text = inp.value.trim();
+  if (!text) return;
+
+  inp.value = '';
+  appendChatMsg('user', text);
+  chatHistory.push({ role: 'user', parts: [{ text }] });
+
+  const btn = document.getElementById('chat-send-btn');
+  btn.disabled = true;
+  const pending = appendChatMsg('assistant', '思考中…', 'chat-pending');
+
+  try {
+    if (!chatCtx) chatCtx = buildChatCtx();
+
+    const payload = {
+      system_instruction: { parts: [{ text: chatCtx }] },
+      contents: chatHistory,
+      generationConfig: { maxOutputTokens: 2048, temperature: 0.5 },
+    };
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CHAT_MODEL}:generateContent?key=${key}`,
+      { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) }
+    );
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data?.error?.message || `HTTP ${resp.status}`);
+
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '（無回應）';
+    pending.remove();
+    appendChatMsg('assistant', reply);
+    chatHistory.push({ role:'model', parts:[{ text: reply }] });
+  } catch(e) {
+    pending.remove();
+    appendChatMsg('assistant', `⚠ 錯誤：${e.message}\n若是 API Key 問題請點 🔑 重新設定。`);
+  }
+  btn.disabled = false;
+  inp.focus();
+}
 </script>
 
 <!-- TradingView Modal -->
@@ -1169,6 +1376,27 @@ window.addEventListener('resize', syncHeaderHeight);
       <button class="tv-close" onclick="closeAI()">✕ 關閉</button>
     </div>
     <div class="ai-modal-body" id="ai-body"></div>
+  </div>
+</div>
+
+<!-- ── Chat FAB ── -->
+<button id="chat-fab" onclick="toggleChat()" title="AI 股票助理">💬</button>
+
+<!-- ── Chat Panel ── -->
+<div id="chat-panel">
+  <div id="chat-hdr">
+    <span style="font-weight:600;font-size:13px">✦ AI 股票助理</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="chat-icon-btn" onclick="chatSetKey()" title="設定 API Key">🔑</button>
+      <button class="chat-icon-btn" onclick="clearChat()" title="清除對話">🗑</button>
+      <button class="chat-icon-btn" onclick="toggleChat()">✕</button>
+    </div>
+  </div>
+  <div id="chat-messages"></div>
+  <div id="chat-input-wrap">
+    <textarea id="chat-input" placeholder="詢問股票相關問題…&#10;例：分析 2330 今日籌碼 / NVDA 目前情況如何？" rows="2"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+    <button id="chat-send-btn" onclick="sendChat()">送出</button>
   </div>
 </div>
 
