@@ -736,47 +736,23 @@ function openChart(ticker, market, name, evt) {
   const create = () => {
     widget.style.display = 'block';
     loading.style.display = 'none';
-
-    if (market === 'TW') {
-      // TW 股票（TWSE/TPEX）使用 iframe widgetembed，
-      // 比 JS Widget API 對台灣交易所代碼更穩定
-      const f = document.createElement('iframe');
-      const p = new URLSearchParams({
-        symbol:          sym,
-        interval:        'D',
-        theme:           'Dark',
-        style:           '1',
-        locale:          'zh_TW',
-        toolbar_bg:      '%230d1420',
-        hide_top_toolbar:'0',
-      });
-      f.src = `https://s3.tradingview.com/widgetembed/?${p.toString()}&studies=STD%3BSupertrend`;
-      f.style.cssText = 'width:100%;height:100%;border:none';
-      f.setAttribute('allowtransparency', 'true');
-      f.setAttribute('allowfullscreen', 'true');
-      widget.appendChild(f);
-    } else {
-      new TradingView.widget({
-        autosize:          true,
-        symbol:            sym,
-        interval:          'D',
-        timezone:          'exchange',
-        theme:             'dark',
-        style:             '1',
-        locale:            'zh_TW',
-        toolbar_bg:        '#0d1420',
-        enable_publishing: false,
-        hide_top_toolbar:  false,
-        studies:           ['STD;Supertrend'],
-        container_id:      'tv_chart_widget',
-      });
-    }
+    new TradingView.widget({
+      autosize:          true,
+      symbol:            sym,
+      interval:          'D',
+      timezone:          'exchange',
+      theme:             'dark',
+      style:             '1',
+      locale:            'zh_TW',
+      toolbar_bg:        '#0d1420',
+      enable_publishing: false,
+      hide_top_toolbar:  false,
+      studies:           ['STD;Supertrend'],
+      container_id:      'tv_chart_widget',
+    });
   };
 
-  if (market === 'TW') {
-    // TW 股票不需要載入 tv.js，直接用 iframe
-    create();
-  } else if (tvLoaded) {
+  if (tvLoaded) {
     create();
   } else {
     const s = document.createElement('script');
