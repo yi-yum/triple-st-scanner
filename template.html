@@ -113,12 +113,13 @@ td{padding:12px 14px;white-space:nowrap;vertical-align:middle}
 .chg.pos{color:var(--green)}.chg.neg{color:var(--red)}
 
 /* Market badge */
-.badge-mkt-us,.badge-mkt-tw{
+.badge-mkt-us,.badge-mkt-tw,.badge-mkt-two{
   font-family:var(--mono);font-size:9px;padding:2px 5px;border-radius:3px;
   display:inline-flex;align-items:center;line-height:1;flex-shrink:0;
 }
-.badge-mkt-us{background:rgba(74,158,255,.12);color:var(--blue);border:1px solid rgba(74,158,255,.3)}
-.badge-mkt-tw{background:rgba(249,115,22,.12);color:var(--tw-color);border:1px solid rgba(249,115,22,.3)}
+.badge-mkt-us {background:rgba(74,158,255,.12);color:var(--blue);border:1px solid rgba(74,158,255,.3)}
+.badge-mkt-tw {background:rgba(249,115,22,.12);color:var(--tw-color);border:1px solid rgba(249,115,22,.3)}
+.badge-mkt-two{background:rgba(155,109,255,.12);color:var(--purple);border:1px solid rgba(155,109,255,.3)}
 
 /* ST lights */
 .lights{display:flex;gap:6px;align-items:center}
@@ -421,9 +422,11 @@ table{min-width:1380px}
 <div class="controls">
   <div class="ctrl-row">
     <span class="ctrl-label">市場</span>
-    <button class="fbtn active" id="btnMktAll" onclick="setMkt('all',this)">全部</button>
-    <button class="fbtn"        id="btnMktUS"  onclick="setMkt('US',this)">🇺🇸 美股</button>
-    <button class="fbtn"        id="btnMktTW"  onclick="setMkt('TW',this)">🇹🇼 台股</button>
+    <button class="fbtn active" id="btnMktAll"  onclick="setMkt('all',this)">全部</button>
+    <button class="fbtn"        id="btnMktUS"   onclick="setMkt('US',this)">🇺🇸 美股</button>
+    <button class="fbtn"        id="btnMktTW"   onclick="setMkt('TW',this)">🇹🇼 台股</button>
+    <button class="fbtn"        id="btnMktTWSE" onclick="setMkt('TWSE',this)">上市</button>
+    <button class="fbtn"        id="btnMktTPEx" onclick="setMkt('TPEx',this)">上櫃</button>
     <div class="ctrl-sep"></div>
     <span class="ctrl-label">訊號</span>
     <button class="fbtn active" id="btnAll"     onclick="setFilter('all',this)">全部</button>
@@ -559,8 +562,8 @@ function setMkt(m, btn) {
   curMkt = m;
   document.querySelectorAll('[id^=btnMkt]').forEach(b =>
     b.classList.remove('active','active-tw','active-p'));
-  if (m === 'TW') btn.classList.add('active-tw');
-  else            btn.classList.add('active');
+  if (m === 'TW' || m === 'TWSE' || m === 'TPEx') btn.classList.add('active-tw');
+  else btn.classList.add('active');
   applyFilters();
 }
 
@@ -624,7 +627,10 @@ function applyFilters() {
   const sector = document.getElementById('sectorSel').value;
   const q = document.getElementById('searchBox').value.trim().toUpperCase();
   displayed = RAW.filter(r => {
-    if (curMkt !== 'all' && r.market !== curMkt)                         return false;
+    if (curMkt === 'US'   && r.market !== 'US')                           return false;
+    if (curMkt === 'TW'   && r.market !== 'TW')                           return false;
+    if (curMkt === 'TWSE' && !r.ticker.endsWith('.TW'))                   return false;
+    if (curMkt === 'TPEx' && !r.ticker.endsWith('.TWO'))                  return false;
     if (curFilter === 'green'       && !r.all_green)                     return false;
     if (curFilter === 'sl'          && !r.stop_loss)                     return false;
     if (curFilter === 'today_green' && r.today_change !== 'to_green')    return false;
@@ -864,9 +870,11 @@ function render() {
     const chgCls  = r.change_pct >= 0 ? 'pos' : 'neg';
     const chgSign = r.change_pct >= 0 ? '+' : '';
 
-    const mktBadge = r.market === 'TW'
-      ? '<span class="badge-mkt-tw">TW</span>'
-      : '<span class="badge-mkt-us">US</span>';
+    const mktBadge = r.market !== 'TW'
+      ? '<span class="badge-mkt-us">US</span>'
+      : r.ticker.endsWith('.TWO')
+        ? '<span class="badge-mkt-two">上櫃</span>'
+        : '<span class="badge-mkt-tw">上市</span>';
 
     let badge = '';
     if (r.stop_loss)                            badge = '<span class="badge bg-red">⚠ 止損警報</span>';
@@ -926,6 +934,13 @@ function render() {
       <td>${fmt52w(r.pct_from_52w)}</td>
       <td>
         ${r.market!=='TW' ? '<span class="chip-na">US</span>' : (() => {
+          // 上市(TWSE)：T86直接抓；上櫃(TPEx)：需FINMIND_TOKEN
+          const noData = r.foreign_net == null && r.trust_net == null;
+          if (noData) {
+            return r.ticker.endsWith('.TWO')
+              ? '<span class="chip-na" title="上櫃籌碼需設定 FINMIND_TOKEN">上櫃—</span>'
+              : '<span class="chip-na">—</span>';
+          }
           const instBadge = r.inst_buy
             ? '<span class="badge-inst-buy">外資+投信同買</span>'
             : r.inst_sell
@@ -938,6 +953,10 @@ function render() {
       </td>
       <td>
         ${r.market!=='TW' ? '<span class="chip-na">US</span>' : (() => {
+          const noData = r.margin_bal == null && r.short_bal == null;
+          if (noData) return r.ticker.endsWith('.TWO')
+            ? '<span class="chip-na" title="上櫃融資需設定 FINMIND_TOKEN">上櫃—</span>'
+            : '<span class="chip-na">—</span>';
           return `${fmtChipBal(r.margin_bal,'融資餘額')} ${fmtChipChg(r.margin_chg)}
                   <span class="ind2">${fmtChipBal(r.short_bal,'融券餘額')} ${fmtChipChg(r.short_chg)}</span>`;
         })()}

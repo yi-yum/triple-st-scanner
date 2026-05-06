@@ -688,8 +688,16 @@ def fetch_earnings_dates(us_results: list) -> dict:
 # ── 台股籌碼面資料 ────────────────────────────────────────────
 
 def _chip_date() -> str:
-    """取得最新交易日字串 YYYYMMDD，週末退回上週五（以台灣時區 UTC+8 為基準）"""
+    """
+    取得最新已發佈交易日字串 YYYYMMDD（以台灣時區 UTC+8 為基準）。
+    TWSE T86 資料於收盤後 ~17:00 台灣時間更新；
+    掃描於台灣時間 05:30 執行，故當日資料尚未發佈，需取前一交易日。
+    """
     d = datetime.now(TW_TZ)
+    # 若現在是台灣時間 17:00 前，當日資料未更新，退回前一日
+    if d.hour < 17:
+        d -= timedelta(days=1)
+    # 再跳過週末
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d.strftime('%Y%m%d')
@@ -1202,14 +1210,15 @@ VIX：{vix if vix else '無資料'} | 全綠：{len(all_green)}支（美股{len(
             ]
         print(f'  [Gemini] Available flash models: {candidates[:5]}')
 
+        # thinkingConfig 只有 gemini-2.5 thinking 模型才支援，一律不帶以保持相容性
         payload = {
             'contents': [{'parts': [{'text': prompt}]}],
             'generationConfig': {
                 'maxOutputTokens': 4096,
                 'temperature': 0.4,
-                'thinkingConfig': {'thinkingBudget': 0}  # 關閉思考模式，節省 token
             }
         }
+
         for model_name in candidates[:3]:
             url = (
                 'https://generativelanguage.googleapis.com/v1beta/models/'
