@@ -1221,9 +1221,53 @@ window.addEventListener('resize', syncHeaderHeight);
 // ══════════════════════════════════════════════════════════════
 // CHAT — AI 股票助理
 // ══════════════════════════════════════════════════════════════
-const GEMINI_CHAT_MODEL = 'gemini-2.0-flash';
-let chatHistory = [];   // {role, parts:[{text}]}
-let chatCtx     = null; // system prompt (建立一次)
+// 不再寫死模型，由 pickChatModel() 動態決定
+let chatHistory    = [];   // {role, parts:[{text}]}
+let chatCtx        = null; // system prompt（建立一次）
+let chatModelCache = null; // 已確認可用的模型名稱
+
+// 動態選出有額度的 flash 模型，避免 quota 耗盡卡死
+async function pickChatModel(key) {
+  if (chatModelCache) return chatModelCache;
+
+  // 取可用模型清單
+  const candidates = [];
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+    const d = await r.json();
+    const all = d.models || [];
+    const flash    = all.filter(m =>  m.name.includes('flash') && !m.name.includes('lite') && (m.supportedGenerationMethods||[]).includes('generateContent'));
+    const flashLit = all.filter(m =>  m.name.includes('flash') &&  m.name.includes('lite') && (m.supportedGenerationMethods||[]).includes('generateContent'));
+    const others   = all.filter(m => !m.name.includes('flash')                              && (m.supportedGenerationMethods||[]).includes('generateContent'));
+    [...flash, ...flashLit, ...others].forEach(m => {
+      const n = m.name.replace('models/', '');
+      if (!candidates.includes(n)) candidates.push(n);
+    });
+  } catch(_) {}
+
+  if (!candidates.length)
+    candidates.push('gemini-2.0-flash-lite', 'gemini-1.5-flash', 'gemini-2.0-flash');
+
+  // 逐一探測：遇到 quota / rate-limit 就換下一個
+  for (const model of candidates.slice(0, 6)) {
+    try {
+      const probe = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+        { method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ contents:[{role:'user',parts:[{text:'hi'}]}],
+                                 generationConfig:{maxOutputTokens:4} }) }
+      );
+      const pd = await probe.json();
+      const errMsg = pd?.error?.message || '';
+      if (probe.ok) { chatModelCache = model; return model; }
+      if (!errMsg.match(/quota|rate|limit|429/i)) { chatModelCache = model; return model; }
+      // quota 耗盡 → 繼續試下一個
+    } catch(_) {}
+  }
+  // 全失敗也回傳第一個，讓外層顯示真正的錯誤
+  chatModelCache = candidates[0];
+  return chatModelCache;
+}
 
 // 把掃描資料濃縮成 system prompt context
 function buildChatCtx() {
@@ -1336,17 +1380,26 @@ async function sendChat() {
   try {
     if (!chatCtx) chatCtx = buildChatCtx();
 
+    // 動態選擇有額度的模型（quota 耗盡時自動換）
+    const model = await pickChatModel(key);
+
     const payload = {
       system_instruction: { parts: [{ text: chatCtx }] },
       contents: chatHistory,
       generationConfig: { maxOutputTokens: 2048, temperature: 0.5 },
     };
     const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_CHAT_MODEL}:generateContent?key=${key}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
       { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) }
     );
     const data = await resp.json();
-    if (!resp.ok) throw new Error(data?.error?.message || `HTTP ${resp.status}`);
+
+    // 若此模型也 quota 耗盡，清快取讓下次重選
+    if (!resp.ok) {
+      const errMsg = data?.error?.message || `HTTP ${resp.status}`;
+      if (errMsg.match(/quota|rate|limit|429/i)) chatModelCache = null;
+      throw new Error(errMsg);
+    }
 
     const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || '（無回應）';
     pending.remove();
