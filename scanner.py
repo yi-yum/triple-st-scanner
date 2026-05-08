@@ -626,6 +626,26 @@ def download_benchmarks() -> dict:
     except Exception as e:
         print(f'  [WARN] VIX: {e}')
         bench['vix'] = None
+
+    # Put/Call Ratio — 用 SPY 選擇權（最近 3 個到期日加總）
+    try:
+        spy   = yf.Ticker('SPY')
+        exps  = spy.options[:3]          # 最近 3 個到期日
+        total_puts = total_calls = 0
+        for exp in exps:
+            chain = spy.option_chain(exp)
+            total_puts  += chain.puts['volume'].fillna(0).sum()
+            total_calls += chain.calls['volume'].fillna(0).sum()
+        if total_calls > 0:
+            bench['pc_ratio'] = round(total_puts / total_calls, 2)
+            print(f'  [Benchmark] SPY P/C Ratio: {bench["pc_ratio"]} '
+                  f'(puts={total_puts:.0f} calls={total_calls:.0f})')
+        else:
+            bench['pc_ratio'] = None
+    except Exception as e:
+        print(f'  [WARN] P/C Ratio: {e}')
+        bench['pc_ratio'] = None
+
     return bench
 
 
@@ -1102,7 +1122,7 @@ def _fetch_us_fundamentals(tickers: list) -> dict:
     return result
 
 
-def analyze_with_gemini(results: list, vix: float | None) -> str:
+def analyze_with_gemini(results: list, vix: float | None, pc_ratio: float | None = None) -> str:
     """用 Gemini REST API 分析全綠股票：美股基本面、台股籌碼面。"""
     api_key = os.environ.get('GEMINI_API_KEY', '')
     if not api_key:
@@ -1160,8 +1180,9 @@ def analyze_with_gemini(results: list, vix: float | None) -> str:
         prompt = f"""你是一位專業股票市場分析師，請用**繁體中文**分析以下今日三重超級趨勢（Triple Supertrend）全綠掃描結果。
 
 === 市場概況 ===
-VIX：{vix if vix else '無資料'} | 全綠：{len(all_green)}支（美股{len(us_green)} / 台股{len(tw_green)}）| 今日新轉綠：{len(just_green)}支
+VIX：{vix if vix else '無資料'} | SPY Put/Call Ratio：{pc_ratio if pc_ratio else '無資料'} | 全綠：{len(all_green)}支（美股{len(us_green)} / 台股{len(tw_green)}）| 今日新轉綠：{len(just_green)}支
 強勢產業：{top_sectors or '無'}
+Put/Call 解讀：P/C > 1.2 市場偏恐慌（逆向看漲）；P/C < 0.7 市場過樂觀（留意回調風險）
 
 === 美股全綠 TOP 20（依超額報酬排序，附基本面）===
 {fmt_us(us_green)}
@@ -1172,7 +1193,7 @@ VIX：{vix if vix else '無資料'} | 全綠：{len(all_green)}支（美股{len(
 請依以下結構輸出分析，每個區塊用 ## 標題：
 
 ## 整體市場情緒
-根據 VIX 與全綠數量，判斷市場多頭強度。
+根據 VIX、Put/Call Ratio 與全綠數量，綜合判斷市場多頭強度與情緒極端值。
 
 ## 美股基本面亮點
 針對上方美股個股，點出基本面最強（低 PE + 高成長）與需留意（PE 過高或成長趨緩）的標的，每支 1 句。
@@ -1214,7 +1235,7 @@ VIX：{vix if vix else '無資料'} | 全綠：{len(all_green)}支（美股{len(
         payload = {
             'contents': [{'parts': [{'text': prompt}]}],
             'generationConfig': {
-                'maxOutputTokens': 4096,
+                'maxOutputTokens': 8192,
                 'temperature': 0.4,
             }
         }
@@ -1242,7 +1263,7 @@ VIX：{vix if vix else '無資料'} | 全綠：{len(all_green)}支（美股{len(
         return ''
 
 
-def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float | None = None) -> str:
+def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float | None = None, pc_ratio: float | None = None) -> str:
     # 補入名稱/產業/市場資訊
     for r in results:
         m = ticker_meta.get(r['ticker'], {})
@@ -1260,13 +1281,15 @@ def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float |
     TEMPLATE = template_path.read_text(encoding='utf-8')
 
     vix_str     = str(vix) if vix is not None else 'null'
-    ai_analysis = analyze_with_gemini(results, vix)
+    pc_str      = str(pc_ratio) if pc_ratio is not None else 'null'
+    ai_analysis = analyze_with_gemini(results, vix, pc_ratio)
     # 反引號和 ${ 會破壞 JS template literal，需要 escape
     ai_safe = ai_analysis.replace('\\', '\\\\').replace('`', '\\`').replace('${', '\\${')
     result = (TEMPLATE
               .replace('__SCAN_TIME__', scan_time)
               .replace('__DATA_JSON__', data_json)
               .replace('__VIX_VALUE__', vix_str)
+              .replace('__PC_VALUE__', pc_str)
               .replace('__AI_ANALYSIS__', ai_safe))
     return result
 
@@ -1392,7 +1415,8 @@ def main():
 
     scan_time = datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M (UTC+8)')
     vix_val   = bench_ret.get('vix')
-    html = generate_html(all_results, scan_time, ticker_meta, vix_val)
+    pc_val    = bench_ret.get('pc_ratio')
+    html = generate_html(all_results, scan_time, ticker_meta, vix_val, pc_val)
     with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
         f.write(html)
 

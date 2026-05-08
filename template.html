@@ -517,12 +517,13 @@ table{min-width:1380px}
 
   </div><!-- /theme-row -->
 
-  <!-- 第二排：VIX 市場情緒 -->
+  <!-- 第二排：VIX 市場情緒 + P/C Ratio -->
   <div class="theme-card" style="margin-bottom:16px">
     <div class="theme-card-title">😱 市場恐慌指數 VIX <span style="opacity:.5;font-size:8px">CBOE Volatility Index</span></div>
     <div class="vix-panel" id="vixPanel">
       <div style="color:var(--muted);font-size:12px">載入中...</div>
     </div>
+    <div id="pcPanel" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)"></div>
   </div>
 
 </div><!-- /tab-theme -->
@@ -533,6 +534,7 @@ table{min-width:1380px}
 // ── Data ────────────────────────────────────────────────────
 const RAW = __DATA_JSON__;
 const VIX = __VIX_VALUE__;
+const PC  = __PC_VALUE__;
 
 RAW.forEach(r => {
   r._statusRank = r.stop_loss ? 0 : r.all_green ? 1 : (r.st1===1||r.st2===1||r.st3===1) ? 2 : 3;
@@ -1046,6 +1048,7 @@ function switchTab(name, btn) {
     buildSectorHeatmap();
     buildEarningsPanel();
     buildVixPanel();
+    buildPcPanel();
   }
 }
 
@@ -1165,6 +1168,42 @@ function buildVixPanel() {
     </div>`;
 }
 
+// ── Put/Call Ratio 儀表 ──────────────────────────────────────
+function buildPcPanel() {
+  const el = document.getElementById('pcPanel');
+  if (!el) return;
+  if (PC === null) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:11px">Put/Call Ratio 資料暫時無法取得</div>';
+    return;
+  }
+  // 顏色與標籤：P/C > 1.2 恐慌（逆向偏多）；< 0.7 貪婪（需留意）；中間中性
+  const clr   = PC > 1.2 ? 'var(--green)' : PC < 0.7 ? 'var(--red)' : 'var(--yellow)';
+  const label = PC > 1.2 ? '市場恐慌・逆向偏多' : PC < 0.7 ? '過度樂觀・留意回調' : '中性區間';
+  // 進度條：0.5~1.5 映射 0~100%
+  const pct   = Math.min(Math.max((PC - 0.5) / 1.0, 0), 1);
+  el.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px;letter-spacing:.5px">
+      📊 SPY PUT/CALL RATIO <span style="opacity:.5;font-size:8px;font-weight:400">最近3個到期日成交量</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+      <div style="font-family:var(--mono);font-size:32px;font-weight:700;color:${clr};line-height:1">${PC}</div>
+      <div style="flex:1;min-width:140px">
+        <div style="height:8px;border-radius:4px;background:linear-gradient(to right,var(--green),var(--yellow),var(--red));position:relative;margin-bottom:5px">
+          <div style="position:absolute;top:-4px;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--bg2);transform:translateX(-50%);left:${(pct*100).toFixed(1)}%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--muted)">
+          <span>0.5</span><span>0.7</span><span>1.0</span><span>1.2</span><span>1.5+</span>
+        </div>
+        <div style="font-size:11px;font-weight:700;color:${clr};margin-top:5px">${label}</div>
+      </div>
+      <div style="font-size:11px;color:var(--muted);line-height:1.7">
+        P/C &lt; 0.7：過度樂觀，留意回調<br>
+        0.7–1.2：正常中性區間<br>
+        P/C &gt; 1.2：恐慌偏高，逆向偏多
+      </div>
+    </div>`;
+}
+
 // ── AI Analysis Modal ──────────────────────────────────────
 const AI_RAW = `__AI_ANALYSIS__`;
 
@@ -1279,7 +1318,7 @@ function buildChatCtx() {
   const fmtZ = (v, unit='張') => v == null ? '—' : `${v > 0 ? '+' : ''}${v}${unit}`;
 
   let ctx = `你是一位專業台美股分析助理。今日掃描資料（__SCAN_TIME__）：\n`;
-  ctx += `VIX=${fmt(VIX)} | 全綠${allGreen.length}支（美${usGreen.length}/台${twGreen.length}）\n\n`;
+  ctx += `VIX=${fmt(VIX)} | SPY P/C Ratio=${PC !== null ? PC : '無資料'} | 全綠${allGreen.length}支（美${usGreen.length}/台${twGreen.length}）\n\n`;
 
   if (usGreen.length) {
     ctx += `【美股全綠 ${usGreen.length}支】\n`;
