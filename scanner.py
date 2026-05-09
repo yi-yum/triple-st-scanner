@@ -519,6 +519,8 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
             'short_chg':      None,
             # 近 20 天收盤價（供 sparkline 使用）
             'close_20d':      [round(float(c), 2) for c in close[-20:]],
+            # 新聞（由 main() 補入）
+            'news':           [],
         }
     except Exception:
         return None
@@ -702,6 +704,88 @@ def fetch_earnings_dates(us_results: list) -> dict:
                 print(f'  Earnings: {done}/{len(candidates)}')
     found = sum(1 for v in result.values() if v)
     print(f'  Earnings dates found: {found}/{len(candidates)}')
+    return result
+
+
+def _news_sentiment(title: str) -> dict:
+    """
+    用 VADER 對新聞標題做情緒分析。
+    回傳 {'label': 'positive'|'negative'|'neutral', 'score': float(-1~1)}
+    """
+    try:
+        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+        _news_sentiment._analyzer = getattr(_news_sentiment, '_analyzer', None) \
+                                    or SentimentIntensityAnalyzer()
+        vs = _news_sentiment._analyzer.polarity_scores(title)
+        c  = vs['compound']
+        label = 'positive' if c >= 0.05 else 'negative' if c <= -0.05 else 'neutral'
+        return {'label': label, 'score': round(c, 3)}
+    except Exception:
+        return {'label': 'neutral', 'score': 0.0}
+
+
+def fetch_news_for_tickers(tickers: list) -> dict:
+    """
+    抓全綠美股最新 3 則新聞（yfinance Ticker.news）。
+    回傳 {ticker: [{title, url, publisher, time}]}
+    """
+    result = {}
+    if not tickers:
+        return result
+
+    def _fetch_one(ticker):
+        try:
+            raw = yf.Ticker(ticker).news
+            if not raw:
+                return ticker, []
+            items = []
+            for n in raw[:3]:
+                # 新版 yfinance (0.2.x+)：資料在 n['content'] 內
+                if 'content' in n and isinstance(n['content'], dict):
+                    c     = n['content']
+                    title = c.get('title', '')
+                    url   = (c.get('canonicalUrl') or {}).get('url', '') \
+                            or (c.get('clickThroughUrl') or {}).get('url', '')
+                    pub   = (c.get('provider') or {}).get('displayName', '')
+                    ts_str = c.get('pubDate', '') or c.get('displayTime', '')
+                    # pubDate 格式 "2026-05-09T12:27:15Z"
+                    try:
+                        from datetime import datetime, timezone
+                        ts = int(datetime.strptime(ts_str, '%Y-%m-%dT%H:%M:%SZ')
+                                 .replace(tzinfo=timezone.utc).timestamp()) if ts_str else 0
+                    except Exception:
+                        ts = 0
+                else:
+                    # 舊版 yfinance：key 直接在頂層
+                    title = n.get('title', '')
+                    url   = n.get('link', '') or n.get('url', '')
+                    pub   = n.get('publisher', '') or n.get('source', '')
+                    ts    = int(n.get('providerPublishTime', 0) or 0)
+
+                if title and url:
+                    sent = _news_sentiment(title)
+                    items.append({
+                        'title':     title,
+                        'url':       url,
+                        'publisher': pub,
+                        'time':      ts,
+                        'sentiment': sent['label'],
+                        'sent_score': sent['score'],
+                    })
+            return ticker, items[:3]
+        except Exception:
+            return ticker, []
+
+    print(f'  Fetching news for {len(tickers)} all-green US tickers...')
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(_fetch_one, t): t for t in tickers}
+        for f in as_completed(futures):
+            ticker, items = f.result()
+            if items:
+                result[ticker] = items
+
+    found = len(result)
+    print(f'  News fetched: {found}/{len(tickers)} tickers with news')
     return result
 
 
@@ -1148,11 +1232,17 @@ def analyze_with_gemini(results: list, vix: float | None, pc_ratio: float | None
             for r in lst[:20]:
                 t = r['ticker']
                 f = us_fundamentals.get(t, {})
+                news_items = r.get('news') or []
+                news_str = ''
+                if news_items:
+                    headlines = '｜'.join(n['title'][:50] for n in news_items[:2])
+                    news_str = f'\n      近期新聞：{headlines}'
                 rows.append(
                     f"  {t} ({r.get('sector','?')}) "
                     f"PE={f.get('pe','—')} FwdPE={f.get('fwd_pe','—')} "
                     f"EPS成長={f.get('eps_growth','—')} 營收成長={f.get('rev_growth','—')} 毛利率={f.get('gross_margin','—')} "
                     f"| RS={r.get('rs_20d','—')} RSI={r.get('rsi','—')}"
+                    f"{news_str}"
                 )
             return '\n'.join(rows) if rows else '  （無）'
 
@@ -1200,6 +1290,9 @@ Put/Call 解讀：P/C > 1.2 市場偏恐慌（逆向看漲）；P/C < 0.7 市場
 
 ## 台股籌碼面亮點
 針對上方台股個股，點出籌碼最集中（外資/投信同步買超 + 融資收斂）與需留意（籌碼分散）的標的，每支 1 句。
+
+## 美股新聞亮點
+針對上方有附近期新聞的美股個股，結合新聞事件與技術面（是否全綠、RS強弱）給出短評，每支 1 句。若無新聞則略過此區塊。
 
 ## 今日新轉綠訊號
 今日新進場訊號有何值得關注之處。
@@ -1405,6 +1498,16 @@ def main():
     earnings_map = fetch_earnings_dates(all_results)
     for r in all_results:
         r['earnings_date'] = earnings_map.get(r['ticker'])
+
+    # Step 3d: 美股新聞（全綠標的）
+    print('\n[3d] Fetching news for all-green US tickers...')
+    all_green_us_tickers = [
+        r['ticker'] for r in all_results
+        if r.get('all_green') and r.get('market') == 'US'
+    ]
+    news_map = fetch_news_for_tickers(all_green_us_tickers)
+    for r in all_results:
+        r['news'] = news_map.get(r['ticker'], [])
 
     # Step 4: 儲存結果
     print('\n[4/4] Saving results...')
