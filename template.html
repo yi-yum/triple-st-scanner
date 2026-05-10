@@ -6,32 +6,53 @@
 <title>Triple ST Scanner · __SCAN_TIME__</title>
 <style>
 /* ── new indicator color classes ── */
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=Noto+Sans+TC:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&family=Special+Elite&family=Noto+Sans+TC:wght@400;700&display=swap');
 :root{
-  --bg:#080c14;--bg2:#0d1420;--bg3:#111d2e;--bg4:#162030;
-  --border:#1a2840;--border2:#223350;
-  --green:#00d4aa;--green2:rgba(0,212,170,.12);
-  --red:#ff5566;--red2:rgba(255,85,102,.12);
-  --yellow:#f5c842;--blue:#4a9eff;--purple:#9b6dff;
-  --tw-color:#f97316;
-  --text:#c8d8e8;--muted:#4a6080;
-  --mono:'IBM Plex Mono',monospace;--sans:'Noto Sans TC',sans-serif;
-  --radius:10px;--hdr-h:52px;
+  /* ── 復古卡其色系 ── */
+  --bg:#1c1a14;      /* 深橄欖黑，老皮革 */
+  --bg2:#252318;     /* 深卡其褐 */
+  --bg3:#2e2b1e;     /* 中卡其 */
+  --bg4:#363324;     /* 亮卡其底 */
+  --border:#4a432e;  /* 舊銅色邊框 */
+  --border2:#5c5238; /* 較亮邊框 */
+
+  /* 強調色 */
+  --green:#8fbc5a;   /* 橄欖綠（軍綠）*/
+  --green2:rgba(143,188,90,.12);
+  --red:#c0543a;     /* 磚紅陶土 */
+  --red2:rgba(192,84,58,.12);
+  --yellow:#c9a227;  /* 琥珀金 */
+  --blue:#7a9e8a;    /* 霧青綠 */
+  --purple:#9b7f5a;  /* 舊皮革棕 */
+  --tw-color:#b07d3a; /* 台股用琥珀橙 */
+
+  /* 文字 */
+  --text:#d6cdb4;    /* 奶油米色 */
+  --muted:#756a50;   /* 褪色卡其 */
+
+  /* 字體：打字機 + 正文 */
+  --mono:'Courier Prime',monospace;
+  --sans:'Noto Sans TC',sans-serif;
+
+  --radius:6px;      /* 直角感強化復古 */
+  --hdr-h:52px;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;font-size:14px}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;font-size:14px;background-image:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,.06) 3px,rgba(0,0,0,.06) 4px)}
 .app{max-width:1400px;margin:0 auto;padding:20px 28px 48px}
 
 /* Header */
 .site-header{
   position:sticky;top:0;z-index:200;
-  background:var(--bg2);border-bottom:1px solid var(--border);
+  background:var(--bg2);
+  border-bottom:2px solid var(--border);
+  box-shadow:0 2px 12px rgba(0,0,0,.4);
   height:var(--hdr-h);display:flex;align-items:center;
   justify-content:space-between;padding:0 28px;
   margin:0 -28px 24px;
 }
 .brand-tag{font-family:var(--mono);font-size:11px;letter-spacing:3px;color:var(--green);text-transform:uppercase;margin-bottom:4px}
-.brand-title{font-family:var(--mono);font-size:20px;font-weight:700;color:#fff;letter-spacing:-.3px}
+.brand-title{font-family:var(--mono);font-size:20px;font-weight:700;color:var(--text);letter-spacing:-.3px}
 .brand-title span{color:var(--green)}
 .brand-sub{font-size:13px;color:var(--muted);margin-top:3px}
 .scan-badge{font-family:var(--mono);font-size:12px;color:var(--muted);text-align:right;line-height:1.8}
@@ -40,9 +61,10 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
 .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:22px}
 .stat-card{
   background:var(--bg2);border:1px solid var(--border);
-  border-left:3px solid var(--border2);
+  border-left:4px solid var(--border2);
   border-radius:var(--radius);padding:14px 16px 12px;
   transition:border-left-color .2s;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04),0 2px 8px rgba(0,0,0,.25);
 }
 .stat-card.c-g{border-left-color:var(--green)}
 .stat-card.c-r{border-left-color:var(--red)}
@@ -59,9 +81,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:1
 
 /* Controls */
 .controls{
-  background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+  background:var(--bg2);border-radius:var(--radius);
+  border-left:3px solid var(--border2);
   padding:14px 16px;margin-bottom:14px;
   display:flex;flex-direction:column;gap:10px;
+  box-shadow:0 2px 8px rgba(0,0,0,.2);
 }
 .ctrl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .ctrl-label{font-family:var(--mono);font-size:12px;letter-spacing:.1em;color:var(--muted);
@@ -85,14 +109,14 @@ input[type=text]:focus{border-color:var(--blue)}
 .ctrl-sep{width:1px;height:22px;background:var(--border2);flex-shrink:0}
 
 /* Table */
-.table-wrap{overflow-x:auto;border-radius:var(--radius);border:1px solid var(--border);background:var(--bg2)}
+.table-wrap{overflow-x:auto;border-radius:var(--radius);background:var(--bg2);box-shadow:0 2px 12px rgba(0,0,0,.25);border-top:2px solid var(--yellow)}
 table{width:100%;border-collapse:collapse;font-size:14px;min-width:820px}
 thead th{
   background:var(--bg3);padding:10px 14px;text-align:left;
-  font-family:var(--mono);font-size:12px;letter-spacing:.1em;color:var(--muted);
-  text-transform:uppercase;border-bottom:1px solid var(--border);
+  font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--muted);
+  text-transform:uppercase;
+  border-bottom:1px solid var(--border);
   white-space:nowrap;user-select:none;
-  position:sticky;top:var(--hdr-h);z-index:10;
 }
 thead th.sortable{cursor:pointer}
 thead th.sortable:hover{color:var(--text)}
@@ -102,13 +126,13 @@ tbody tr{border-bottom:1px solid var(--border);transition:background .1s}
 tbody tr:hover{background:var(--bg4) !important}
 tbody tr:last-child{border-bottom:none}
 tbody tr:nth-child(even){background:rgba(13,20,32,.6)}
-tbody tr.row-green{background:rgba(0,212,170,.06)}
-tbody tr.row-sl{background:rgba(255,85,102,.07)}
+tbody tr.row-green{background:rgba(143,188,90,.06)}
+tbody tr.row-sl{background:rgba(192,84,58,.07)}
 td{padding:12px 14px;white-space:nowrap;vertical-align:middle}
 
 .tick{font-family:var(--mono);font-weight:700;color:var(--green);font-size:15px;letter-spacing:.5px}
 .nm{color:var(--text);font-size:13px;max-width:170px;overflow:hidden;text-overflow:ellipsis;opacity:.85}
-.price{font-family:var(--mono);font-weight:600;color:#fff}
+.price{font-family:var(--mono);font-weight:600;color:var(--text)}
 .chg{font-family:var(--mono);font-weight:600}
 .chg.pos{color:var(--green)}.chg.neg{color:var(--red)}
 
@@ -117,23 +141,23 @@ td{padding:12px 14px;white-space:nowrap;vertical-align:middle}
   font-family:var(--mono);font-size:9px;padding:2px 5px;border-radius:3px;
   display:inline-flex;align-items:center;line-height:1;flex-shrink:0;
 }
-.badge-mkt-us {background:rgba(74,158,255,.12);color:var(--blue);border:1px solid rgba(74,158,255,.3)}
+.badge-mkt-us {background:rgba(122,158,138,.12);color:var(--blue);border:1px solid rgba(122,158,138,.3)}
 .badge-mkt-tw {background:rgba(249,115,22,.12);color:var(--tw-color);border:1px solid rgba(249,115,22,.3)}
 .badge-mkt-two{background:rgba(155,109,255,.12);color:var(--purple);border:1px solid rgba(155,109,255,.3)}
 
 /* ST lights */
 .lights{display:flex;gap:6px;align-items:center}
 .dot{width:11px;height:11px;border-radius:50%;flex-shrink:0}
-.dot.g{background:var(--green);box-shadow:0 0 7px rgba(0,212,170,.7)}
-.dot.r{background:var(--red);box-shadow:0 0 7px rgba(255,85,102,.7)}
+.dot.g{background:var(--green);box-shadow:0 0 7px rgba(143,188,90,.7)}
+.dot.r{background:var(--red);box-shadow:0 0 7px rgba(192,84,58,.7)}
 .dot.n{background:var(--border2)}
 .dot-lbl{font-family:var(--mono);font-size:12px;color:var(--muted)}
 
 /* Badges */
 .badge{font-family:var(--mono);font-size:12px;letter-spacing:.05em;padding:3px 9px;
   border-radius:5px;font-weight:600;white-space:nowrap}
-.bg-green{background:var(--green2);color:var(--green);border:1px solid rgba(0,212,170,.3)}
-.bg-red  {background:var(--red2);color:var(--red);border:1px solid rgba(255,85,102,.3)}
+.bg-green{background:var(--green2);color:var(--green);border:1px solid rgba(143,188,90,.3)}
+.bg-red  {background:var(--red2);color:var(--red);border:1px solid rgba(192,84,58,.3)}
 .bg-yellow{background:rgba(245,200,66,.1);color:var(--yellow);border:1px solid rgba(245,200,66,.25)}
 .bg-muted {background:var(--bg3);color:var(--muted);border:1px solid var(--border)}
 .sec-badge{font-family:var(--mono);font-size:12px;background:var(--bg3);
@@ -143,11 +167,11 @@ td{padding:12px 14px;white-space:nowrap;vertical-align:middle}
 .pnl.pos{color:var(--green)}.pnl.neg{color:var(--red)}.pnl.na{color:var(--muted)}
 
 /* Today change */
-.bg-today-g{background:rgba(0,212,170,.18);color:var(--green);border:1px solid rgba(0,212,170,.5);font-size:9px}
-.bg-today-r{background:rgba(255,85,102,.18);color:var(--red);border:1px solid rgba(255,85,102,.5);font-size:9px}
+.bg-today-g{background:rgba(143,188,90,.18);color:var(--green);border:1px solid rgba(143,188,90,.5);font-size:9px}
+.bg-today-r{background:rgba(192,84,58,.18);color:var(--red);border:1px solid rgba(192,84,58,.5);font-size:9px}
 .today-none{color:var(--muted);font-family:var(--mono);font-size:11px}
-tbody tr.row-today-g{background:rgba(0,212,170,.08);border-left:3px solid var(--green)}
-tbody tr.row-today-r{background:rgba(255,85,102,.08);border-left:3px solid var(--red)}
+tbody tr.row-today-g{background:rgba(143,188,90,.08);border-left:3px solid var(--green)}
+tbody tr.row-today-r{background:rgba(192,84,58,.08);border-left:3px solid var(--red)}
 
 .vol{font-family:var(--mono);font-size:12px;color:var(--muted)}
 .entry-info{font-family:var(--mono);font-size:12px;color:var(--muted)}
@@ -157,29 +181,29 @@ tbody tr.row-today-r{background:rgba(255,85,102,.08);border-left:3px solid var(-
 .disclaimer{font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;
   padding:16px;margin-top:8px;border-top:1px solid var(--border);line-height:1.7}
 /* RSI */
-.rsi-hot    {color:#ff5566;font-weight:700}
-.rsi-good   {color:#00d4aa;font-weight:700}
-.rsi-neutral{color:#f5c842}
-.rsi-cold   {color:#4a9eff}
+.rsi-hot    {color:#c0543a;font-weight:700}
+.rsi-good   {color:#8fbc5a;font-weight:700}
+.rsi-neutral{color:#c9a227}
+.rsi-cold   {color:#7a9e8a}
 .rsi-na     {color:var(--muted)}
 /* ADX */
-.adx-strong {color:#00d4aa;font-weight:700}
-.adx-mid    {color:#f5c842}
+.adx-strong {color:#8fbc5a;font-weight:700}
+.adx-mid    {color:#c9a227}
 .adx-weak   {color:var(--muted)}
 /* 量比 / RS / 52w */
-.vr-hot{color:#00d4aa;font-weight:700}.vr-ok{color:#a3e4d7}.vr-low{color:var(--muted)}
-.rs-pos{color:#00d4aa;font-weight:600}.rs-neg{color:#ff5566;font-weight:600}.rs-na{color:var(--muted)}
-.w52-near{color:#f5c842}.w52-far{color:var(--muted)}
+.vr-hot{color:#8fbc5a;font-weight:700}.vr-ok{color:#a3e4d7}.vr-low{color:var(--muted)}
+.rs-pos{color:#8fbc5a;font-weight:600}.rs-neg{color:#c0543a;font-weight:600}.rs-na{color:var(--muted)}
+.w52-near{color:#c9a227}.w52-far{color:var(--muted)}
 .ind2{font-size:12px;display:block;margin-top:2px}
 /* 籌碼面 */
-.chip-buy {color:#00d4aa;font-weight:700}
-.chip-sell{color:#ff5566;font-weight:700}
+.chip-buy {color:#8fbc5a;font-weight:700}
+.chip-sell{color:#c0543a;font-weight:700}
 .chip-neu {color:var(--muted)}
 .chip-na  {color:var(--border2)}
 .badge-inst-buy {font-family:var(--mono);font-size:11px;padding:1px 5px;border-radius:3px;
-  background:rgba(0,212,170,.15);color:var(--green);border:1px solid rgba(0,212,170,.4)}
+  background:rgba(143,188,90,.15);color:var(--green);border:1px solid rgba(143,188,90,.4)}
 .badge-inst-sell{font-family:var(--mono);font-size:11px;padding:1px 5px;border-radius:3px;
-  background:rgba(255,85,102,.15);color:var(--red);border:1px solid rgba(255,85,102,.4)}
+  background:rgba(192,84,58,.15);color:var(--red);border:1px solid rgba(192,84,58,.4)}
 table{min-width:1380px}
 /* 主力吃貨 */
 .badge-mainpower{font-family:var(--mono);font-size:11px;padding:1px 5px;border-radius:3px;
@@ -188,9 +212,10 @@ table{min-width:1380px}
 .tab-nav{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:20px}
 .tab-btn{font-family:var(--mono);font-size:14px;padding:10px 22px;border:none;
   background:transparent;color:var(--muted);cursor:pointer;
-  border-bottom:2px solid transparent;transition:all .15s;letter-spacing:.5px}
+  border-bottom:3px solid transparent;transition:all .15s;letter-spacing:.8px;
+  text-transform:uppercase}
 .tab-btn:hover{color:var(--text)}
-.tab-btn.active{color:var(--green);border-bottom-color:var(--green)}
+.tab-btn.active{color:var(--yellow);border-bottom-color:var(--yellow)}
 .tab-panel{display:block}.tab-panel.hidden{display:none}
 /* ── 題材雷達 ── */
 .theme-row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
@@ -210,17 +235,17 @@ table{min-width:1380px}
 .earn-item{display:flex;align-items:center;gap:8px;padding:7px 10px;
   border-radius:6px;border:1px solid var(--border);background:var(--bg3)}
 .earn-tag{font-family:var(--mono);font-size:11px;padding:2px 6px;border-radius:4px;white-space:nowrap}
-.earn-tag.urgent{background:rgba(255,85,102,.15);color:var(--red);border:1px solid rgba(255,85,102,.4)}
+.earn-tag.urgent{background:rgba(192,84,58,.15);color:var(--red);border:1px solid rgba(192,84,58,.4)}
 .earn-tag.soon   {background:rgba(245,200,66,.15);color:var(--yellow);border:1px solid rgba(245,200,66,.4)}
-.earn-tag.safe   {background:rgba(74,158,255,.12);color:var(--blue);border:1px solid rgba(74,158,255,.35)}
+.earn-tag.safe   {background:rgba(122,158,138,.12);color:var(--blue);border:1px solid rgba(122,158,138,.35)}
 /* VIX 儀表 */
 .vix-panel{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
 .vix-val{font-family:var(--mono);font-size:40px;font-weight:700;line-height:1}
 .vix-bar-wrap{flex:1;min-width:160px}
 .vix-bar-track{height:10px;border-radius:5px;
-  background:linear-gradient(to right,#00d4aa,#f5c842,#ff5566);margin-bottom:6px;position:relative}
+  background:linear-gradient(to right,#8fbc5a,#c9a227,#c0543a);margin-bottom:6px;position:relative}
 .vix-bar-thumb{position:absolute;top:-3px;width:16px;height:16px;border-radius:50%;
-  background:#fff;border:2px solid var(--bg2);transform:translateX(-50%);transition:left .4s}
+  background:var(--text);border:2px solid var(--bg2);transform:translateX(-50%);transition:left .4s}
 .vix-legend{display:flex;justify-content:space-between;font-family:var(--mono);
   font-size:9px;color:var(--muted)}
 .vix-label{font-size:13px;margin-top:8px;font-weight:700}
@@ -230,10 +255,10 @@ table{min-width:1380px}
 .funnel-layer{flex:1;min-width:150px;padding:16px 14px;background:var(--bg2);text-align:center;position:relative}
 .funnel-layer+.funnel-layer{border-left:1px solid var(--border)}
 .funnel-arrow{display:none}
-.fl-l1{border-top:3px solid #4a9eff}
-.fl-l2{border-top:3px solid #00d4aa}
-.fl-l3{border-top:3px solid #f5c842}
-.fl-l4{border-top:3px solid #a78bfa}
+.fl-l1{border-top:3px solid #7a9e8a}
+.fl-l2{border-top:3px solid #8fbc5a}
+.fl-l3{border-top:3px solid #c9a227}
+.fl-l4{border-top:3px solid #9b7f5a}
 .funnel-lbl{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);margin-bottom:8px}
 .funnel-icon{font-size:20px;margin-bottom:6px}
 .funnel-count{font-family:var(--mono);font-weight:700;font-size:30px;line-height:1;margin-bottom:4px}
@@ -244,7 +269,7 @@ table{min-width:1380px}
 /* 層次點點 */
 .layer-dots{display:flex;gap:4px;align-items:center}
 .ld{width:9px;height:9px;border-radius:50%;flex-shrink:0}
-.ld-1{background:#4a9eff}.ld-2{background:#00d4aa}.ld-3{background:#f5c842}.ld-4{background:#a78bfa}
+.ld-1{background:#7a9e8a}.ld-2{background:#8fbc5a}.ld-3{background:#c9a227}.ld-4{background:#9b7f5a}
 .ld-off{background:var(--border)}
 /* 風控狀態 */
 .risk-ok{color:var(--green);font-size:13px}.risk-warn{color:var(--red);font-size:13px}
@@ -253,11 +278,11 @@ table{min-width:1380px}
 .lfbtn{font-family:var(--mono);font-size:13px;padding:6px 14px;border:1px solid var(--border);
   background:var(--bg2);color:var(--muted);border-radius:5px;cursor:pointer;transition:all .15s;white-space:nowrap}
 .lfbtn:hover{color:var(--text)}
-.lfbtn.active{color:#fff;border-color:transparent}
-.lfbtn-all.active{background:#4a9eff}
-.lfbtn-l2.active{background:#00d4aa}
-.lfbtn-l3.active{background:#f5c842;color:#1a1d26}
-.lfbtn-l4.active{background:#a78bfa}
+.lfbtn.active{color:#1c1a14;border-color:transparent}
+.lfbtn-all.active{background:#7a9e8a}
+.lfbtn-l2.active{background:#8fbc5a}
+.lfbtn-l3.active{background:#c9a227;color:#1c1a14}
+.lfbtn-l4.active{background:#9b7f5a}
 /* 結果列高亮 */
 tr.row-l4 td{background:rgba(167,139,250,.04)}
 tr.row-l3 td{background:rgba(245,200,66,.03)}
@@ -370,7 +395,7 @@ tr.row-l3 td{background:rgba(245,200,66,.03)}
 #chat-fab{
   position:fixed;bottom:28px;right:28px;z-index:1100;
   width:52px;height:52px;border-radius:50%;border:none;cursor:pointer;
-  background:var(--green);color:#0d1420;font-size:22px;
+  background:var(--yellow);color:#1c1a14;font-size:22px;
   box-shadow:0 4px 16px rgba(0,0,0,.5);
   transition:transform .15s,box-shadow .15s;
 }
@@ -424,7 +449,7 @@ tr.row-l3 td{background:rgba(245,200,66,.03)}
 }
 #chat-input:focus{outline:none;border-color:var(--green)}
 #chat-send-btn{
-  background:var(--green);color:#0d1420;border:none;border-radius:6px;
+  background:var(--yellow);color:#1c1a14;border:none;border-radius:6px;
   font-size:12px;font-weight:600;padding:0 14px;cursor:pointer;
   transition:opacity .15s;white-space:nowrap;
 }
@@ -461,9 +486,9 @@ tr.row-l3 td{background:rgba(245,200,66,.03)}
 .news-meta{font-family:var(--mono);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:6px}
 /* 情緒 badge */
 .sent-pos{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;
-  background:rgba(0,212,170,.15);color:var(--green);border:1px solid rgba(0,212,170,.4);white-space:nowrap}
+  background:rgba(143,188,90,.15);color:var(--green);border:1px solid rgba(143,188,90,.4);white-space:nowrap}
 .sent-neg{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;
-  background:rgba(255,85,102,.15);color:var(--red);border:1px solid rgba(255,85,102,.4);white-space:nowrap}
+  background:rgba(192,84,58,.15);color:var(--red);border:1px solid rgba(192,84,58,.4);white-space:nowrap}
 .sent-neu{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;
   background:var(--bg3);color:var(--muted);border:1px solid var(--border);white-space:nowrap}
 /* 新聞按鈕（在 tick-row 內）*/
@@ -907,7 +932,7 @@ function openChart(ticker, market, name, evt) {
       theme:             'dark',
       style:             '1',
       locale:            'zh_TW',
-      toolbar_bg:        '#0d1420',
+      toolbar_bg:        '#252318',
       enable_publishing: false,
       hide_top_toolbar:  false,
       studies:           ['STD;Supertrend'],
@@ -1165,13 +1190,13 @@ function renderStats() {
       <div class="stat-val r">${slCount}</div>
       <div class="stat-sub">需注意持倉</div>
     </div>
-    <div class="stat-card" style="border-color:rgba(0,212,170,.35);cursor:pointer"
+    <div class="stat-card" style="border-color:rgba(143,188,90,.35);cursor:pointer"
          onclick="setFilter('today_green',document.getElementById('btnTodayG'))">
       <div class="stat-label">今日轉全綠</div>
       <div class="stat-val g">${todayGCount}</div>
       <div class="stat-sub">點擊篩選</div>
     </div>
-    <div class="stat-card" style="border-color:rgba(255,85,102,.35);cursor:pointer"
+    <div class="stat-card" style="border-color:rgba(192,84,58,.35);cursor:pointer"
          onclick="setFilter('today_red',document.getElementById('btnTodayR'))">
       <div class="stat-label">今日轉紅</div>
       <div class="stat-val r">${todayRCount}</div>
@@ -1358,17 +1383,17 @@ function renderFunnel() {
     </div>`;
 
   document.getElementById('factorFunnel').innerHTML =
-    layer('fl-l1','#4a9eff','🔍','Layer 1 · 粗篩','流動性篩選後',
-          total, '基準', '#4a9eff',
+    layer('fl-l1','#7a9e8a','🔍','Layer 1 · 粗篩','流動性篩選後',
+          total, '基準', '#7a9e8a',
           '<span>· 最低股價門檻</span><span>· 20日均量門檻</span><span>· 掛牌股票</span>') +
-    layer('fl-l2','#00d4aa','📈','Layer 2 · 趨勢確認','ST全綠 + MACD週線正',
-          l2cnt, p(l2cnt,total), '#00d4aa',
+    layer('fl-l2','#8fbc5a','📈','Layer 2 · 趨勢確認','ST全綠 + MACD週線正',
+          l2cnt, p(l2cnt,total), '#8fbc5a',
           '<span>· SuperTrend 三線全綠</span><span>· 週線 MACD 柱體 > 0</span>') +
-    layer('fl-l3','#f5c842','⚖️','Layer 3 · 多因子打分','價值+成長+品質+動能 ≥ 6/12',
-          l3cnt, p(l3cnt,l2cnt), '#f5c842',
+    layer('fl-l3','#c9a227','⚖️','Layer 3 · 多因子打分','價值+成長+品質+動能 ≥ 6/12',
+          l3cnt, p(l3cnt,l2cnt), '#c9a227',
           '<span>🔵 價值：FwdPE / PE</span><span>🟢 成長：EPS + 營收成長</span><span>🟡 品質：毛利率 + ADX</span><span>🟣 動能：RS + MACD + RSI</span>') +
-    layer('fl-l4','#a78bfa','🛡️','Layer 4 · 風控','最終候選清單',
-          l4cnt, p(l4cnt,l3cnt), '#a78bfa',
+    layer('fl-l4','#9b7f5a','🛡️','Layer 4 · 風控','最終候選清單',
+          l4cnt, p(l4cnt,l3cnt), '#9b7f5a',
           '<span>· 無止損警報</span><span>· ATR% &lt; 6%</span><span>· RSI &lt; 80（非超買）</span>');
 }
 
@@ -1434,10 +1459,10 @@ function renderFactorTable(list) {
       <div style="height:100%;border-radius:2px;background:${clr};width:${n/max*100}%"></div></div>`;
     // mini 4-dim dots
     const dims = [
-      {s:r._valScore, c:'#4a9eff'},
-      {s:r._growScore, c:'#00d4aa'},
-      {s:r._qualScore, c:'#f5c842'},
-      {s:r._momScore, c:'#a78bfa'},
+      {s:r._valScore, c:'#7a9e8a'},
+      {s:r._growScore, c:'#8fbc5a'},
+      {s:r._qualScore, c:'#c9a227'},
+      {s:r._momScore, c:'#9b7f5a'},
     ];
     const dots = `<div style="display:flex;gap:3px;margin-top:4px">${
       dims.map(d=>`<span style="font-family:var(--mono);font-size:10px;color:${d.s>0?d.c:'var(--border)'}">${d.s}</span>`).join('<span style="color:var(--border)">·</span>')
@@ -1483,10 +1508,10 @@ function renderFactorTable(list) {
         <div style="font-size:11px;color:${(r.change_pct||0)>=0?'var(--green)':'var(--red)'}">${pct(r.change_pct)}</div>
       </td>
       <td>${layerDots(r)}</td>
-      ${dimCell(r._momScore, 3, '#a78bfa', momLines)}
-      ${dimCell(r._qualScore, 3, '#f5c842', qualLines)}
-      ${dimCell(r._growScore, 3, '#00d4aa', growLines)}
-      ${dimCell(r._valScore, 3, '#4a9eff', valLines)}
+      ${dimCell(r._momScore, 3, '#9b7f5a', momLines)}
+      ${dimCell(r._qualScore, 3, '#c9a227', qualLines)}
+      ${dimCell(r._growScore, 3, '#8fbc5a', growLines)}
+      ${dimCell(r._valScore, 3, '#7a9e8a', valLines)}
       <td>${riskCell(r)}</td>
       ${scoreCell(r)}
       <td>${mktBadge(r)}</td>
@@ -1549,8 +1574,8 @@ function buildSectorHeatmap() {
   el.innerHTML = list.map(s => {
     const pct = s.green_pct;
     const hot = pct >= 0.6, warm = pct >= 0.3;
-    const bg     = hot  ? 'rgba(0,212,170,.15)' : warm ? 'rgba(245,200,66,.1)' : 'rgba(255,85,102,.08)';
-    const border = hot  ? 'rgba(0,212,170,.4)'  : warm ? 'rgba(245,200,66,.3)' : 'rgba(255,85,102,.25)';
+    const bg     = hot  ? 'rgba(143,188,90,.15)' : warm ? 'rgba(245,200,66,.1)' : 'rgba(192,84,58,.08)';
+    const border = hot  ? 'rgba(143,188,90,.4)'  : warm ? 'rgba(245,200,66,.3)' : 'rgba(192,84,58,.25)';
     const clr    = hot  ? 'var(--green)'         : warm ? 'var(--yellow)'        : 'var(--red)';
     const pnlStr = s.avg_pnl != null
       ? `${s.avg_pnl >= 0 ? '+' : ''}${s.avg_pnl.toFixed(1)}%` : '-';
@@ -1656,7 +1681,7 @@ function buildPcPanel() {
       <div style="font-family:var(--mono);font-size:32px;font-weight:700;color:${clr};line-height:1">${PC}</div>
       <div style="flex:1;min-width:140px">
         <div style="height:8px;border-radius:4px;background:linear-gradient(to right,var(--green),var(--yellow),var(--red));position:relative;margin-bottom:5px">
-          <div style="position:absolute;top:-4px;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--bg2);transform:translateX(-50%);left:${(pct*100).toFixed(1)}%"></div>
+          <div style="position:absolute;top:-4px;width:14px;height:14px;border-radius:50%;background:var(--text);border:2px solid var(--bg2);transform:translateX(-50%);left:${(pct*100).toFixed(1)}%"></div>
         </div>
         <div style="display:flex;justify-content:space-between;font-family:var(--mono);font-size:9px;color:var(--muted)">
           <span>0.5</span><span>0.7</span><span>1.0</span><span>1.2</span><span>1.5+</span>
