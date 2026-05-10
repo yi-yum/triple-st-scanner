@@ -457,8 +457,9 @@ table{min-width:1380px}
 
 <!-- Tab 導覽 -->
 <div class="tab-nav">
-  <button class="tab-btn active" id="tabBtnScan"  onclick="switchTab('scan',this)">📊 個股掃描</button>
-  <button class="tab-btn"        id="tabBtnTheme" onclick="switchTab('theme',this)">🎯 題材雷達</button>
+  <button class="tab-btn active" id="tabBtnScan"   onclick="switchTab('scan',this)">📊 個股掃描</button>
+  <button class="tab-btn"        id="tabBtnTheme"  onclick="switchTab('theme',this)">🎯 題材雷達</button>
+  <button class="tab-btn"        id="tabBtnFactor" onclick="switchTab('factor',this)">🔬 多因子篩選</button>
 </div>
 
 <!-- ── Tab 1：個股掃描 ── -->
@@ -573,6 +574,93 @@ table{min-width:1380px}
   </div>
 
 </div><!-- /tab-theme -->
+
+<!-- ── Tab 3：多因子篩選 ── -->
+<div id="tab-factor" class="tab-panel hidden">
+
+  <!-- 統計概覽列 -->
+  <div class="stats-row" id="factorStatsRow"></div>
+
+  <!-- 因子篩選控制列 -->
+  <div class="controls" style="margin-bottom:14px">
+    <div class="ctrl-row">
+      <span class="ctrl-label">市場</span>
+      <button class="fbtn active" id="fMktAll"  onclick="setFactorMkt('all',this)">全部</button>
+      <button class="fbtn"        id="fMktUS"   onclick="setFactorMkt('US',this)">🇺🇸 美股</button>
+      <button class="fbtn"        id="fMktTW"   onclick="setFactorMkt('TW',this)">🇹🇼 台股</button>
+      <div class="ctrl-sep"></div>
+      <span class="ctrl-label">SuperTrend</span>
+      <button class="fbtn active" id="fStAll"    onclick="setFactorST('all',this)">全部</button>
+      <button class="fbtn"        id="fStGreen"  onclick="setFactorST('green',this)">🟢 全綠</button>
+      <button class="fbtn"        id="fStPartial" onclick="setFactorST('partial',this)">🟡 部分</button>
+      <div class="ctrl-sep"></div>
+      <span class="ctrl-label">MACD週線</span>
+      <button class="fbtn active" id="fMacdAll" onclick="setFactorMACD('all',this)">全部</button>
+      <button class="fbtn"        id="fMacdPos" onclick="setFactorMACD('pos',this)">📈 正背離</button>
+      <button class="fbtn"        id="fMacdNeg" onclick="setFactorMACD('neg',this)">📉 負背離</button>
+    </div>
+    <div class="ctrl-row">
+      <span class="ctrl-label">ADX 趨勢強度</span>
+      <button class="fbtn active" id="fAdxAll"    onclick="setFactorADX('all',this)">全部</button>
+      <button class="fbtn"        id="fAdxStrong" onclick="setFactorADX('strong',this)">⚡ &gt;25</button>
+      <button class="fbtn"        id="fAdxWeak"   onclick="setFactorADX('weak',this)">💤 ≤25</button>
+      <div class="ctrl-sep"></div>
+      <span class="ctrl-label">RSI 甜蜜區</span>
+      <button class="fbtn active" id="fRsiAll"  onclick="setFactorRSI('all',this)">全部</button>
+      <button class="fbtn"        id="fRsiSweet" onclick="setFactorRSI('sweet',this)">🟢 50–70</button>
+      <div class="ctrl-sep"></div>
+      <span class="ctrl-label">綜合分數</span>
+      <button class="fbtn active" id="fScoreAll"  onclick="setFactorScore('all',this)">全部</button>
+      <button class="fbtn"        id="fScore3"    onclick="setFactorScore('3',this)">⭐⭐⭐ 滿分</button>
+      <button class="fbtn"        id="fScore2"    onclick="setFactorScore('2',this)">⭐⭐ 2分+</button>
+      <div class="ctrl-sep"></div>
+      <input type="text" id="factorSearch" placeholder="搜尋代號 / 名稱..." oninput="_factorFilter.q=this.value;applyFactorFilters()">
+    </div>
+  </div>
+
+  <!-- 因子說明列 -->
+  <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+    <div class="factor-badge-info" style="background:rgba(0,212,170,.08);border:1px solid rgba(0,212,170,.25);border-radius:6px;padding:8px 14px;font-size:12px;color:var(--muted)">
+      <span style="color:var(--green);font-weight:700">ST</span> SuperTrend 日線趨勢方向
+    </div>
+    <div class="factor-badge-info" style="background:rgba(245,200,66,.08);border:1px solid rgba(245,200,66,.25);border-radius:6px;padding:8px 14px;font-size:12px;color:var(--muted)">
+      <span style="color:var(--yellow);font-weight:700">MACD</span> 週線 MACD 柱體方向（<span style="opacity:.6">月線確認待後端接入</span>）
+    </div>
+    <div class="factor-badge-info" style="background:rgba(99,179,237,.08);border:1px solid rgba(99,179,237,.25);border-radius:6px;padding:8px 14px;font-size:12px;color:var(--muted)">
+      <span style="color:#63b3ed;font-weight:700">ADX</span> 趨勢強度 &gt;25 確認
+    </div>
+    <div style="flex:1;text-align:right;font-size:11px;color:var(--muted);align-self:center;padding-right:4px">
+      🔬 v0：由現有掃描資料派生 · 多時框MACD / BIAS Z-Score 待後端升級後接入
+    </div>
+  </div>
+
+  <!-- 結果表格 -->
+  <div class="table-wrap">
+    <table id="factorTable">
+      <thead>
+        <tr>
+          <th class="sortable" onclick="sortFactor('ticker',this)">代號</th>
+          <th>名稱</th>
+          <th class="sortable" onclick="sortFactor('price',this)">現價 / 1d%</th>
+          <th class="sortable" onclick="sortFactor('_stScore',this)">ST 因子</th>
+          <th class="sortable" onclick="sortFactor('_macdScore',this)">MACD 週線</th>
+          <th class="sortable" onclick="sortFactor('adx',this)">ADX 強度</th>
+          <th class="sortable" onclick="sortFactor('rsi',this)">RSI</th>
+          <th class="sortable" onclick="sortFactor('vol_ratio',this)">量比</th>
+          <th class="sortable" onclick="sortFactor('rs_20d',this)">超額報酬</th>
+          <th class="sortable" onclick="sortFactor('_compositeScore',this)">綜合得分 ↓</th>
+          <th>市場</th>
+        </tr>
+      </thead>
+      <tbody id="factorTbody"></tbody>
+    </table>
+    <div class="foot-info" id="factorFootInfo"></div>
+  </div>
+
+  <div class="disclaimer">
+    ⚠ 多因子篩選為研究輔助工具，不構成投資建議。綜合得分為各因子加權，v0 版本基於現有掃描資料計算，後續版本將接入多時框 MACD 與籌碼 BIAS Z-Score。
+  </div>
+</div><!-- /tab-factor -->
 
 </div><!-- /app -->
 
@@ -1117,8 +1205,179 @@ function switchTab(name, btn) {
     buildVixPanel();
     buildPcPanel();
   }
+  if (name === 'factor' && !window._factorBuilt) {
+    window._factorBuilt = true;
+    buildFactorPanel();
+  }
 }
 
+// ── 多因子篩選 ────────────────────────────────────────────────
+let _factorData = [];        // 計算後的因子資料
+let _factorSort = { key: '_compositeScore', asc: false };
+let _factorFilter = { mkt: 'all', st: 'all', macd: 'all', adx: 'all', rsi: 'all', score: 'all', q: '' };
+
+function buildFactorPanel() {
+  // 為每筆 RAW 資料計算因子分數
+  _factorData = RAW.map(r => {
+    // ST 因子 (0–2)：全綠=2，部分=1，全紅=0
+    const _stScore = r.all_green ? 2 : (r.st1 || r.st2 || r.st3) ? 1 : 0;
+
+    // MACD 週線因子（由現有 macd_weekly 欄位，無則以 RSI+momentum 代理）
+    // v0：有 macd_weekly → 用它；無則以 ret_5d > 0 代理
+    let _macdScore = 0;
+    if (r.macd_weekly != null) {
+      _macdScore = r.macd_weekly > 0 ? 1 : -1;
+    } else if (r.ret_5d != null) {
+      _macdScore = r.ret_5d > 0 ? 1 : 0;   // 代理值，等後端接入後替換
+    }
+
+    // ADX 強度因子：>25 = 有效趨勢
+    const _adxScore = (r.adx != null && r.adx > 25) ? 1 : 0;
+
+    // RSI 甜蜜區：50–70
+    const _rsiSweet = (r.rsi != null && r.rsi >= 50 && r.rsi <= 70);
+
+    // 綜合得分 (0–4)：ST(0-2) + MACD(0-1) + ADX(0-1)
+    const _compositeScore = _stScore + Math.max(0, _macdScore) + _adxScore;
+
+    return { ...r, _stScore, _macdScore, _adxScore, _rsiSweet, _compositeScore };
+  });
+
+  renderFactorStats();
+  applyFactorFilters();
+}
+
+function renderFactorStats() {
+  const total   = _factorData.length;
+  const score4  = _factorData.filter(r => r._compositeScore >= 4).length;
+  const score3  = _factorData.filter(r => r._compositeScore >= 3).length;
+  const stPass  = _factorData.filter(r => r._stScore === 2).length;
+  const macdPos = _factorData.filter(r => r._macdScore > 0).length;
+  const adxPass = _factorData.filter(r => r._adxScore === 1).length;
+
+  document.getElementById('factorStatsRow').innerHTML = `
+    <div class="stat-card"><div class="stat-num">${total}</div><div class="stat-lbl">總分析股票</div></div>
+    <div class="stat-card" style="border-color:var(--green)"><div class="stat-num" style="color:var(--green)">${score3}</div><div class="stat-lbl">綜合 3分+</div></div>
+    <div class="stat-card" style="border-color:var(--yellow)"><div class="stat-num" style="color:var(--yellow)">${score4}</div><div class="stat-lbl">滿分 4分</div></div>
+    <div class="stat-card"><div class="stat-num">${stPass}</div><div class="stat-lbl">ST 全綠</div></div>
+    <div class="stat-card"><div class="stat-num">${macdPos}</div><div class="stat-lbl">MACD 週線正</div></div>
+    <div class="stat-card"><div class="stat-num">${adxPass}</div><div class="stat-lbl">ADX &gt;25 強勢</div></div>
+  `;
+}
+
+function applyFactorFilters() {
+  const f = _factorFilter;
+  const q = f.q.toLowerCase();
+  let list = _factorData.filter(r => {
+    if (f.mkt !== 'all' && r.market !== f.mkt) return false;
+    if (f.st === 'green'   && r._stScore < 2) return false;
+    if (f.st === 'partial' && r._stScore !== 1) return false;
+    if (f.macd === 'pos' && r._macdScore <= 0) return false;
+    if (f.macd === 'neg' && r._macdScore >= 0) return false;
+    if (f.adx === 'strong' && r._adxScore !== 1) return false;
+    if (f.adx === 'weak'   && r._adxScore !== 0) return false;
+    if (f.rsi === 'sweet'  && !r._rsiSweet) return false;
+    if (f.score === '3' && r._compositeScore < 3) return false;
+    if (f.score === '2' && r._compositeScore < 2) return false;
+    if (q && !r.ticker.toLowerCase().includes(q) && !(r.name||'').toLowerCase().includes(q)) return false;
+    return true;
+  });
+
+  // 排序
+  list.sort((a, b) => {
+    const av = a[_factorSort.key] ?? -Infinity;
+    const bv = b[_factorSort.key] ?? -Infinity;
+    return _factorSort.asc ? (av > bv ? 1 : -1) : (av < bv ? 1 : -1);
+  });
+
+  renderFactorTable(list);
+}
+
+function renderFactorTable(list) {
+  const stLabel  = s => s === 2 ? '<span style="color:var(--green)">🟢 全綠</span>' :
+                         s === 1 ? '<span style="color:var(--yellow)">🟡 部分</span>' :
+                                   '<span style="color:var(--red)">🔴 全紅</span>';
+  const macdLabel = s => s > 0  ? '<span style="color:var(--green)">📈 正</span>' :
+                          s < 0  ? '<span style="color:var(--red)">📉 負</span>' :
+                                   '<span style="color:var(--muted)">— 中性</span>';
+  const scoreBar = n => {
+    const max = 4;
+    const stars = '⭐'.repeat(n) + '☆'.repeat(Math.max(0, max - n));
+    const clr = n >= 3 ? 'var(--green)' : n >= 2 ? 'var(--yellow)' : 'var(--muted)';
+    return `<span style="color:${clr};font-size:13px">${stars}</span> <span style="font-family:var(--mono);font-weight:700;color:${clr}">${n}/${max}</span>`;
+  };
+  const pct = v => v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`;
+  const mktBadge = r => r.market === 'US' ? '<span class="badge badge-us">US</span>' :
+                         r.market === 'TWSE' ? '<span class="badge badge-tw">上市</span>' :
+                         '<span class="badge badge-tw">上櫃</span>';
+
+  document.getElementById('factorTbody').innerHTML = list.map(r => `
+    <tr>
+      <td><span style="font-family:var(--mono);font-weight:700">${r.ticker}</span></td>
+      <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${r.name || '—'}</td>
+      <td style="font-family:var(--mono)">
+        ${r.price != null ? r.price.toFixed(2) : '—'}
+        <div style="font-size:10px;color:${(r.chg_pct||0)>=0?'var(--green)':'var(--red)'}">${pct(r.chg_pct)}</div>
+      </td>
+      <td>${stLabel(r._stScore)}</td>
+      <td>${macdLabel(r._macdScore)}</td>
+      <td style="font-family:var(--mono)">${r.adx != null ? r.adx.toFixed(1) : '—'}</td>
+      <td style="font-family:var(--mono);color:${r.rsi>70?'var(--red)':r.rsi>=50?'var(--green)':'var(--muted)'}">${r.rsi != null ? r.rsi.toFixed(1) : '—'}</td>
+      <td style="font-family:var(--mono)">${r.vol_ratio != null ? r.vol_ratio.toFixed(2) + 'x' : '—'}</td>
+      <td style="font-family:var(--mono);color:${(r.rs_20d||0)>=0?'var(--green)':'var(--red)'}">${pct(r.rs_20d)}</td>
+      <td>${scoreBar(r._compositeScore)}</td>
+      <td>${mktBadge(r)}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:24px">無符合條件的股票</td></tr>';
+
+  document.getElementById('factorFootInfo').textContent =
+    `顯示 ${list.length} / ${_factorData.length} 檔　· 依綜合得分排序`;
+}
+
+function sortFactor(key, th) {
+  if (_factorSort.key === key) _factorSort.asc = !_factorSort.asc;
+  else { _factorSort.key = key; _factorSort.asc = false; }
+  document.querySelectorAll('#factorTable th').forEach(t => t.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(_factorSort.asc ? 'sort-asc' : 'sort-desc');
+  applyFactorFilters();
+}
+
+function setFactorMkt(v, btn) {
+  _factorFilter.mkt = v;
+  document.querySelectorAll('[id^="fMkt"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFactorFilters();
+}
+function setFactorST(v, btn) {
+  _factorFilter.st = v;
+  document.querySelectorAll('[id^="fSt"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFactorFilters();
+}
+function setFactorMACD(v, btn) {
+  _factorFilter.macd = v;
+  document.querySelectorAll('[id^="fMacd"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFactorFilters();
+}
+function setFactorADX(v, btn) {
+  _factorFilter.adx = v;
+  document.querySelectorAll('[id^="fAdx"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFactorFilters();
+}
+function setFactorRSI(v, btn) {
+  _factorFilter.rsi = v;
+  document.querySelectorAll('[id^="fRsi"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFactorFilters();
+}
+function setFactorScore(v, btn) {
+  _factorFilter.score = v;
+  document.querySelectorAll('[id^="fScore"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  applyFactorFilters();
+}
 // ── 板塊熱力圖 ────────────────────────────────────────────────
 function buildSectorHeatmap() {
   const sectors = {};

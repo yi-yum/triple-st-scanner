@@ -3,365 +3,80 @@
 Triple Supertrend Full-Market Scanner
 掃描 S&P 500 + S&P 400 + Russell 2000 + 台股 (TWSE + TPEx)
 找出三重超級趨勢全綠 (allGreen) 標的，每日自動更新。
+
+模組結構
+--------
+scanner.py         ← 本檔：設定、analyze_ticker、main 流程
+indicators.py      ← 技術指標計算（ST / RSI / ADX / MACD / BIAS）
+ticker_fetcher.py  ← 股票清單抓取
+data_handler.py    ← 批次下載 + benchmark
+chip_data.py       ← 台股籌碼（三大法人 + 融資融券）
+news_fetcher.py    ← 新聞情緒分析
+report_generator.py← HTML 生成 + Gemini AI 分析
 """
 
-import yfinance as yf
-import pandas as pd
-import numpy as np
 import json
 import os
-from pathlib import Path
-import io
-import time
-import requests
+import sys
+import warnings
+import numpy as np
+import pandas as pd
+import yfinance as yf
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import warnings
+from pathlib import Path
+
 warnings.filterwarnings('ignore')
 
-TW_TZ = timezone(timedelta(hours=8))   # UTC+8 台灣時區
-
 # Windows terminal UTF-8
-import sys
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
+# ── 子模組 ─────────────────────────────────────────────────────
+from indicators      import calc_supertrend, compute_factor_scores
+from ticker_fetcher  import get_tickers_with_meta
+from data_handler    import bulk_download_all, download_benchmarks
+from chip_data       import fetch_chip_institutional, fetch_chip_margin
+from news_fetcher    import fetch_news_for_tickers
+from report_generator import generate_html
+
+TW_TZ = timezone(timedelta(hours=8))
+
 # ── 設定 ──────────────────────────────────────────────────────
-ST_PARAMS        = [(11, 2.0), (10, 1.0), (12, 3.0)]  # (ATR期數, 乘數)
-MIN_PRICE_US     = 5.0        # 最低股價 USD (過濾仙股)
-MIN_AVG_VOL_US   = 500_000    # 20日均量門檻 (US)
-MIN_PRICE_TW     = 10.0       # 最低股價 TWD (過濾仙股)
-MIN_AVG_VOL_TW   = 500_000    # 20日均量門檻 (TW, 500張/日 = 500,000股)
-BATCH_SIZE       = 20         # 分析時的分批大小
-MAX_WORKERS      = 4          # 分析執行緒數
-DL_CHUNK_US      = 1000       # US 下載分塊大小
-DL_CHUNK_TW      = 500        # TW 下載分塊大小
-CACHE_FILE       = 'entry_cache.json'
-OUTPUT_HTML      = 'triple_st_dashboard.html'
-
-_HEADERS = {
-    'User-Agent': (
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/124.0.0.0 Safari/537.36'
-    )
-}
+ST_PARAMS      = [(11, 2.0), (10, 1.0), (12, 3.0)]   # (ATR期數, 乘數)
+MIN_PRICE_US   = 5.0        # 最低股價 USD
+MIN_AVG_VOL_US = 500_000    # 20日均量門檻 (US)
+MIN_PRICE_TW   = 10.0       # 最低股價 TWD
+MIN_AVG_VOL_TW = 500_000    # 20日均量門檻 (TW，500張/日)
+BATCH_SIZE     = 20         # 分析時的分批大小
+MAX_WORKERS    = 4          # 分析執行緒數
+CACHE_FILE     = 'entry_cache.json'
+OUTPUT_HTML    = 'triple_st_dashboard.html'
 
 
-# ── 1. 取得股票清單 ────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+# 核心分析：單一股票
+# ════════════════════════════════════════════════════════════════
 
-def _fetch_sp_wiki(url: str, sym_col: str, name_col: str, sec_col: str) -> dict:
-    """從 Wikipedia 取得 S&P 成分股 (含名稱/產業)"""
-    meta = {}
-    label = url.split('List_of_')[1].replace('%26P_', '&P ').replace('_companies', '')
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=20)
-        resp.raise_for_status()
-        tables = pd.read_html(io.StringIO(resp.text))
-        df = tables[0]
-        df.columns = [str(c).strip() for c in df.columns]
-
-        sym_col_f  = next((c for c in df.columns if sym_col.lower()  in c.lower()), None)
-        name_col_f = next((c for c in df.columns if name_col.lower() in c.lower()), None)
-        sec_col_f  = next((c for c in df.columns if 'sector'         in c.lower()), None)
-
-        if sym_col_f is None:
-            print(f'  [WARN] Cannot find symbol column for {label}')
-            return meta
-
-        keep_cols = [c for c in [sym_col_f, name_col_f, sec_col_f] if c]
-        count = 0
-        for rec in df[keep_cols].to_dict('records'):
-            ticker = str(rec[sym_col_f]).strip().replace('.', '-').upper()
-            if not ticker or ticker == 'NAN':
-                continue
-            meta[ticker] = {
-                'name':     str(rec[name_col_f]).strip() if name_col_f else ticker,
-                'sector':   str(rec[sec_col_f]).strip()  if sec_col_f  else 'Unknown',
-                'market':   'US',
-                'currency': 'USD',
-            }
-            count += 1
-        print(f'  [OK] {label} — {count} tickers')
-    except Exception as e:
-        print(f'  [FAIL] {label}: {e}')
-    return meta
-
-
-def _fetch_russell2000() -> dict:
-    """從 iShares IWM ETF 持倉 CSV 取得 Russell 2000 成分股"""
-    meta = {}
-    url = (
-        'https://www.ishares.com/us/products/239714/ishares-russell-2000-etf/'
-        '1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund'
-    )
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=40)
-        resp.raise_for_status()
-        text = resp.text
-
-        # 找到 header 行（含 "Ticker" 欄位）
-        lines = text.split('\n')
-        header_idx = None
-        for i, line in enumerate(lines):
-            if line.startswith('Ticker,') or ',Ticker,' in line or '"Ticker"' in line:
-                header_idx = i
-                break
-
-        if header_idx is None:
-            print('  [FAIL] Russell 2000: Cannot find Ticker header row')
-            return meta
-
-        df = pd.read_csv(io.StringIO('\n'.join(lines[header_idx:])))
-        df.columns = [str(c).strip().strip('"') for c in df.columns]
-
-        ticker_col = next((c for c in df.columns if c.upper() == 'TICKER'), None)
-        name_col   = next((c for c in df.columns if 'name' in c.lower()), None)
-        sector_col = next((c for c in df.columns if 'sector' in c.lower()), None)
-        asset_col  = next((c for c in df.columns if 'asset' in c.lower()), None)
-
-        if ticker_col is None:
-            print('  [FAIL] Russell 2000: No Ticker column found')
-            return meta
-
-        keep_cols = [c for c in [ticker_col, name_col, sector_col, asset_col] if c]
-        count = 0
-        for rec in df[keep_cols].to_dict('records'):
-            ticker = str(rec[ticker_col]).strip().strip('"').upper()
-            if not ticker or ticker in ('-', 'NAN', '', '-'):
-                continue
-            # 只保留 Equity 類型 (跳過現金/衍生品)
-            if asset_col:
-                asset = str(rec[asset_col]).strip().upper()
-                if 'EQUITY' not in asset and asset not in ('STOCK',):
-                    continue
-            # ticker 只允許英文字母和 - (排除數字代碼)
-            clean = ticker.replace('-', '').replace('.', '')
-            if not clean.isalpha():
-                continue
-
-            meta[ticker] = {
-                'name':     str(rec[name_col]).strip()    if name_col    else ticker,
-                'sector':   str(rec[sector_col]).strip()  if sector_col  else 'Unknown',
-                'market':   'US',
-                'currency': 'USD',
-            }
-            count += 1
-        print(f'  [OK] Russell 2000 — {count} tickers')
-    except Exception as e:
-        print(f'  [FAIL] Russell 2000: {e}')
-    return meta
-
-
-def _fetch_twse_stocks() -> dict:
-    """從 TWSE OpenData 取得台灣上市股票"""
-    meta = {}
-    url = 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        count = 0
-        for item in data:
-            code = str(item.get('Code', '')).strip()
-            name = str(item.get('Name', '')).strip()
-
-            # 只保留 4 位數純數字代碼 (排除ETF 0050/0056、特別股等)
-            if not code.isdigit() or len(code) != 4:
-                continue
-
-            ticker_yf = f'{code}.TW'
-            meta[ticker_yf] = {
-                'name':     name,
-                'sector':   '台灣上市',
-                'market':   'TW',
-                'currency': 'TWD',
-            }
-            count += 1
-        print(f'  [OK] TWSE (台灣上市) — {count} tickers')
-    except Exception as e:
-        print(f'  [FAIL] TWSE: {e}')
-    return meta
-
-
-def _fetch_tpex_stocks() -> dict:
-    """從 TPEx OpenData 取得台灣上櫃股票"""
-    meta = {}
-    url = 'https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes'
-    try:
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        count = 0
-        for item in data:
-            code = str(item.get('SecuritiesCompanyCode', item.get('SecuritiesCode', ''))).strip()
-            name = str(item.get('CompanyName', item.get('CompanyAbbreviation', ''))).strip()
-
-            # 只保留 4 位數純數字
-            if not code.isdigit() or len(code) != 4:
-                continue
-
-            ticker_yf = f'{code}.TWO'
-            meta[ticker_yf] = {
-                'name':     name,
-                'sector':   '台灣上櫃',
-                'market':   'TW',
-                'currency': 'TWD',
-            }
-            count += 1
-        print(f'  [OK] TPEx (台灣上櫃) — {count} tickers')
-    except Exception as e:
-        print(f'  [FAIL] TPEx: {e}')
-    return meta
-
-
-def get_tickers_with_meta() -> dict:
-    """取得 S&P 500 + S&P 400 + Russell 2000 + 台灣上市/上櫃 清單"""
-    meta = {}
-
-    # S&P 500
-    meta.update(_fetch_sp_wiki(
-        'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies',
-        'Symbol', 'Security', 'GICS Sector'
-    ))
-    # S&P 400
-    meta.update(_fetch_sp_wiki(
-        'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies',
-        'Symbol', 'Security', 'GICS Sector'
-    ))
-    # Russell 2000
-    meta.update(_fetch_russell2000())
-    # Taiwan
-    meta.update(_fetch_twse_stocks())
-    meta.update(_fetch_tpex_stocks())
-
-    us_cnt = sum(1 for v in meta.values() if v.get('market') == 'US')
-    tw_cnt = sum(1 for v in meta.values() if v.get('market') == 'TW')
-    print(f'  Total tickers: US={us_cnt} / TW={tw_cnt} / All={len(meta)}')
-    return meta
-
-
-# ── 2. 計算超級趨勢方向 ────────────────────────────────────────
-def calc_supertrend(high: np.ndarray, low: np.ndarray,
-                    close: np.ndarray, period: int, mult: float) -> np.ndarray:
-    """
-    回傳每根K棒的方向陣列：1 = 多方(綠), -1 = 空方(紅), 0 = 未定義
-    使用 Wilder's ATR + 標準 Supertrend 邏輯
-    """
-    n = len(close)
-    if n < period + 5:
-        return np.zeros(n, dtype=int)
-
-    prev_c = np.empty(n)
-    prev_c[0] = close[0]
-    prev_c[1:] = close[:-1]
-    tr = np.maximum(high - low,
-         np.maximum(np.abs(high - prev_c), np.abs(low - prev_c)))
-
-    # Wilder's ATR (RMA)
-    atr = np.zeros(n)
-    atr[period - 1] = tr[:period].mean()
-    for i in range(period, n):
-        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
-    atr[:period - 1] = atr[period - 1]
-
-    hl2      = (high + low) / 2.0
-    basic_up = hl2 + mult * atr
-    basic_dn = hl2 - mult * atr
-    final_up = basic_up.copy()
-    final_dn = basic_dn.copy()
-    direction = np.zeros(n, dtype=int)
-    direction[0] = 1
-
-    for i in range(1, n):
-        if basic_up[i] < final_up[i - 1] or close[i - 1] > final_up[i - 1]:
-            final_up[i] = basic_up[i]
-        else:
-            final_up[i] = final_up[i - 1]
-        if basic_dn[i] > final_dn[i - 1] or close[i - 1] < final_dn[i - 1]:
-            final_dn[i] = basic_dn[i]
-        else:
-            final_dn[i] = final_dn[i - 1]
-        if close[i] > final_up[i - 1]:
-            direction[i] = 1
-        elif close[i] < final_dn[i - 1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i - 1]
-
-    return direction
-
-
-# ── 2b. RSI / ADX ─────────────────────────────────────────────
-def calc_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Wilder's RSI，回傳長度同 close 的陣列，前 period 根為 nan"""
-    n = len(close)
-    rsi = np.full(n, np.nan)
-    if n < period + 2:
-        return rsi
-    delta = np.diff(close.astype(float))
-    avg_g = np.where(delta[:period] > 0, delta[:period], 0.0).mean()
-    avg_l = np.where(delta[:period] < 0, -delta[:period], 0.0).mean()
-    for i in range(period, len(delta)):
-        g = delta[i] if delta[i] > 0 else 0.0
-        l = -delta[i] if delta[i] < 0 else 0.0
-        avg_g = (avg_g * (period - 1) + g) / period
-        avg_l = (avg_l * (period - 1) + l) / period
-        rs = avg_g / avg_l if avg_l > 1e-10 else 100.0
-        rsi[i + 1] = 100.0 - 100.0 / (1.0 + rs)
-    return rsi
-
-
-def calc_adx(high: np.ndarray, low: np.ndarray,
-             close: np.ndarray, period: int = 14) -> np.ndarray:
-    """Wilder's ADX，回傳長度同 close 的陣列"""
-    n = len(close)
-    adx = np.full(n, np.nan)
-    if n < period * 2 + 2:
-        return adx
-    h, l, c = high.astype(float), low.astype(float), close.astype(float)
-    pc = np.empty(n); pc[0] = c[0]; pc[1:] = c[:-1]
-    tr  = np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
-    up  = np.concatenate([[0.0], h[1:] - h[:-1]])
-    dn  = np.concatenate([[0.0], l[:-1] - l[1:]])
-    pdm = np.where((up > dn) & (up > 0), up, 0.0)
-    ndm = np.where((dn > up) & (dn > 0), dn, 0.0)
-    # 初始 Wilder 平滑值
-    atr_w = tr[1:period + 1].mean()
-    pdm_w = pdm[1:period + 1].mean()
-    ndm_w = ndm[1:period + 1].mean()
-    dx_list: list = []
-    for i in range(period, n):
-        atr_w = (atr_w * (period - 1) + tr[i])  / period
-        pdm_w = (pdm_w * (period - 1) + pdm[i]) / period
-        ndm_w = (ndm_w * (period - 1) + ndm[i]) / period
-        pdi = 100.0 * pdm_w / atr_w if atr_w > 1e-10 else 0.0
-        ndi = 100.0 * ndm_w / atr_w if atr_w > 1e-10 else 0.0
-        s = pdi + ndi
-        dx_list.append(100.0 * abs(pdi - ndi) / s if s > 1e-10 else 0.0)
-    if len(dx_list) < period:
-        return adx
-    adx_val = float(np.mean(dx_list[:period]))
-    base_idx = period * 2
-    if base_idx < n:
-        adx[base_idx] = adx_val
-    for j in range(period, len(dx_list)):
-        adx_val = (adx_val * (period - 1) + dx_list[j]) / period
-        idx = j + period + 1
-        if idx < n:
-            adx[idx] = adx_val
-    return adx
-
-
-# ── 3. 分析單一股票 ────────────────────────────────────────────
 def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
                    min_price: float = MIN_PRICE_US,
-                   min_vol: float   = MIN_AVG_VOL_US,
-                   market: str      = 'US',
-                   currency: str    = 'USD'):
-    """分析單一股票，回傳結果 dict 或 None"""
+                   min_vol:   float = MIN_AVG_VOL_US,
+                   market:    str   = 'US',
+                   currency:  str   = 'USD') -> dict | None:
+    """
+    分析單一股票，回傳結果 dict 或 None（不符篩選條件時）。
+
+    新增多因子欄位（來自 indicators.compute_factor_scores）：
+        bias_zscore   籌碼乖離 Z-Score
+        weekly_hist   週線 MACD 柱體
+        weekly_slope  週線 MACD 柱體斜率
+        weekly_above  週線 MACD 線是否在訊號線上方
+        monthly_hist  月線 MACD 柱體
+        monthly_slope 月線 MACD 柱體斜率
+        monthly_above 月線 MACD 線是否在訊號線上方
+        macd_weekly   = weekly_hist（前端相容）
+        macd_monthly  = monthly_hist（前端相容）
+    """
     try:
         if len(df) < 40:
             return None
@@ -375,38 +90,37 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
         cur_price = float(close[-1])
         avg_vol   = float(np.mean(vol[-20:]))
 
-        # 前置過濾（使用市場對應門檻）
+        # 前置過濾
         if cur_price < min_price or avg_vol < min_vol:
             return None
 
-        # 計算三條超級趨勢
-        dirs = [calc_supertrend(high, low, close, p, m) for p, m in ST_PARAMS]
+        # ── 三條 SuperTrend ──
+        dirs      = [calc_supertrend(high, low, close, p, m) for p, m in ST_PARAMS]
         cur_dirs  = [int(d[-1]) for d in dirs]
         prev_dirs = [int(d[-2]) for d in dirs] if len(close) >= 2 else cur_dirs
 
-        all_green      = all(d == 1  for d in cur_dirs)
+        all_green      = all(d ==  1 for d in cur_dirs)
         any_red        = any(d == -1 for d in cur_dirs)
-        prev_all_green = all(d == 1  for d in prev_dirs)
+        prev_all_green = all(d ==  1 for d in prev_dirs)
 
         # 今日轉燈偵測
-        today_change        = None
-        today_change_detail = None
+        today_change = today_change_detail = None
         if not prev_all_green and all_green:
-            red_count_prev = sum(1 for d in prev_dirs if d == -1)
-            today_change        = 'to_green'
-            today_change_detail = f'{red_count_prev}紅→全綠'
+            red_prev           = sum(1 for d in prev_dirs if d == -1)
+            today_change       = 'to_green'
+            today_change_detail = f'{red_prev}紅→全綠'
         elif prev_all_green and any_red:
-            red_count_now = sum(1 for d in cur_dirs if d == -1)
-            turned = [f'ST{i+1}' for i, (p, c) in enumerate(zip(prev_dirs, cur_dirs)) if p == 1 and c == -1]
-            today_change        = 'to_red'
-            today_change_detail = f'全綠→{red_count_now}紅({",".join(turned)})'
+            red_now            = sum(1 for d in cur_dirs  if d == -1)
+            turned             = [f'ST{i+1}' for i, (p, c) in enumerate(zip(prev_dirs, cur_dirs))
+                                  if p == 1 and c == -1]
+            today_change       = 'to_red'
+            today_change_detail = f'全綠→{red_now}紅({",".join(turned)})'
 
-        # 找最近一次「三線全綠」的起始K棒
+        # 最近一次三線全綠起始 K 棒（進場基準）
         all_green_arr = np.array(
             [all(dirs[j][i] == 1 for j in range(3)) for i in range(len(close))]
         )
-        entry_price = None
-        entry_date  = None
+        entry_price = entry_date = None
         for i in range(len(all_green_arr) - 1, 0, -1):
             if all_green_arr[i] and not all_green_arr[i - 1]:
                 entry_price = float(close[i])
@@ -420,52 +134,39 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
                 entry_price = cached.get('price', entry_price)
                 entry_date  = cached.get('date',  entry_date)
 
-        pnl_pct = None
-        if entry_price and entry_price > 0:
-            pnl_pct = round((cur_price - entry_price) / entry_price * 100, 2)
-
+        pnl_pct   = round((cur_price - entry_price) / entry_price * 100, 2) \
+                    if entry_price and entry_price > 0 else None
         stop_loss = bool(any_red and entry_price is not None and cur_price < entry_price)
 
         prev_close = float(close[-2]) if len(close) >= 2 else cur_price
         chg_pct    = round((cur_price - prev_close) / prev_close * 100, 2)
 
-        # ── 新增技術指標 ──
-        rsi_arr = calc_rsi(close)
-        adx_arr = calc_adx(high, low, close)
-
-        cur_rsi = float(rsi_arr[-1]) if not np.isnan(rsi_arr[-1]) else None
-        cur_adx = float(adx_arr[-1]) if not np.isnan(adx_arr[-1]) else None
-
-        # ATR%(14) = Wilder ATR / 現價 × 100
-        pc_ = np.empty(len(close)); pc_[0] = close[0]; pc_[1:] = close[:-1]
-        tr_ = np.maximum(high-low, np.maximum(np.abs(high-pc_), np.abs(low-pc_)))
-        atr14 = np.zeros(len(close))
-        if len(close) >= 14:
-            atr14[13] = tr_[:14].mean()
-            for _i in range(14, len(close)):
-                atr14[_i] = (atr14[_i-1]*13 + tr_[_i]) / 14
-        atr_pct = round(atr14[-1]/cur_price*100, 2) if cur_price > 0 and atr14[-1] > 0 else None
+        # ── 多因子指標（indicators.py）──
+        factor = compute_factor_scores(high, low, close, df_daily=df, st_params=ST_PARAMS)
 
         # 量比 = 今日量 / 20日均量
-        vol_ratio = round(float(vol[-1]/avg_vol), 2) if avg_vol > 0 else None
+        vol_ratio = round(float(vol[-1] / avg_vol), 2) if avg_vol > 0 else None
 
-        # 主力吃貨訊號（台股適用：爆量吸籌 + 盤整 + 紅K）
-        today_money    = cur_price * float(vol[-1])
-        vol10_std      = float(np.std(close[-10:]))  if len(close) >= 10 else None
-        vol10_mean     = float(np.mean(close[-10:])) if len(close) >= 10 else None
-        volatility_10  = (vol10_std / vol10_mean) if (vol10_std is not None and vol10_mean and vol10_mean > 0) else 1.0
-        pct_chg_1d     = float((close[-1] - close[-2]) / close[-2]) if len(close) >= 2 else 0.0
-        cond_vol_spike   = (vol_ratio is not None and vol_ratio > 2.5) and (today_money > 20_000_000)
-        cond_price_stable = (volatility_10 < 0.05) or (abs(pct_chg_1d) < 0.07)
-        cond_bullish_k    = close[-1] > open_p[-1]
-        mainpower = bool(cond_vol_spike and cond_price_stable and cond_bullish_k)
+        # 主力吃貨（台股：爆量 + 盤整 + 紅K）
+        today_money  = cur_price * float(vol[-1])
+        vol10_std    = float(np.std(close[-10:]))  if len(close) >= 10 else None
+        vol10_mean   = float(np.mean(close[-10:])) if len(close) >= 10 else None
+        volatility10 = (vol10_std / vol10_mean) if vol10_std and vol10_mean else 1.0
+        pct_chg_1d   = float((close[-1] - close[-2]) / close[-2]) if len(close) >= 2 else 0.0
+        mainpower = bool(
+            vol_ratio is not None and vol_ratio > 2.5 and today_money > 20_000_000
+            and (volatility10 < 0.05 or abs(pct_chg_1d) < 0.07)
+            and close[-1] > open_p[-1]
+        )
 
         # 多日報酬率
-        ret_5d  = round((cur_price-float(close[-6]))/float(close[-6])*100, 2)  if len(close)>=6  else None
-        ret_20d = round((cur_price-float(close[-21]))/float(close[-21])*100, 2) if len(close)>=21 else None
+        ret_5d  = round((cur_price - float(close[-6]))  / float(close[-6])  * 100, 2) \
+                  if len(close) >= 6  else None
+        ret_20d = round((cur_price - float(close[-21])) / float(close[-21]) * 100, 2) \
+                  if len(close) >= 21 else None
 
-        # 距52週高點%
-        high_52 = float(np.max(high[-252:])) if len(high) >= 20 else float(np.max(high))
+        # 距 52 週高點
+        high_52      = float(np.max(high[-252:])) if len(high) >= 20 else float(np.max(high))
         pct_from_52w = round((cur_price - high_52) / high_52 * 100, 2)
 
         # 持倉天數
@@ -477,12 +178,14 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
                 pass
 
         return {
+            # ─ 基本 ─
             'ticker':               ticker,
             'market':               market,
             'currency':             currency,
             'price':                round(cur_price, 2),
             'change_pct':           chg_pct,
             'avg_vol_m':            round(avg_vol / 1_000_000, 2),
+            # ─ SuperTrend ─
             'st1':                  cur_dirs[0],
             'st2':                  cur_dirs[1],
             'st3':                  cur_dirs[2],
@@ -490,176 +193,104 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
             'any_red':              any_red,
             'today_change':         today_change,
             'today_change_detail':  today_change_detail,
+            # ─ 進場 / 損益 ─
             'entry_price':          round(entry_price, 2) if entry_price else None,
             'entry_date':           entry_date,
             'pnl_pct':              pnl_pct,
             'stop_loss':            stop_loss,
-            # 新欄位
-            'rsi':            round(cur_rsi, 1) if cur_rsi is not None else None,
-            'adx':            round(cur_adx, 1) if cur_adx is not None else None,
-            'atr_pct':        atr_pct,
-            'vol_ratio':      vol_ratio,
-            'mainpower':      mainpower,
-            'ret_5d':         ret_5d,
-            'ret_20d':        ret_20d,
-            'pct_from_52w':   pct_from_52w,
-            'high_52w':       round(high_52, 2),
-            'days_in_trade':  days_in_trade,
-            'rs_20d':         None,   # 由 main() 補入
-            # 台股籌碼面（由 main() 補入，US 為 None）
-            'foreign_net':    None,
-            'trust_net':      None,
-            'dealer_net':     None,
-            'inst_total':     None,
-            'inst_buy':       False,
-            'inst_sell':      False,
-            'margin_bal':     None,
-            'short_bal':      None,
-            'margin_chg':     None,
-            'short_chg':      None,
-            # 近 20 天收盤價（供 sparkline 使用）
-            'close_20d':      [round(float(c), 2) for c in close[-20:]],
-            # 新聞（由 main() 補入）
-            'news':           [],
+            'days_in_trade':        days_in_trade,
+            # ─ 技術指標（來自 indicators.py）─
+            'rsi':                  factor['rsi'],
+            'adx':                  factor['adx'],
+            'atr_pct':              factor['atr_pct'],
+            # ─ 多因子（新增）─
+            'bias_zscore':          factor['bias_zscore'],
+            'weekly_hist':          factor['weekly_hist'],
+            'weekly_slope':         factor['weekly_slope'],
+            'weekly_above':         factor['weekly_above'],
+            'monthly_hist':         factor['monthly_hist'],
+            'monthly_slope':        factor['monthly_slope'],
+            'monthly_above':        factor['monthly_above'],
+            'macd_weekly':          factor['macd_weekly'],    # 前端相容
+            'macd_monthly':         factor['macd_monthly'],   # 前端相容
+            # ─ 量價 ─
+            'vol_ratio':            vol_ratio,
+            'mainpower':            mainpower,
+            'ret_5d':               ret_5d,
+            'ret_20d':              ret_20d,
+            'pct_from_52w':         pct_from_52w,
+            'high_52w':             round(high_52, 2),
+            'rs_20d':               None,   # 由 main() 補入
+            # ─ 台股籌碼（由 main() 補入）─
+            'foreign_net':  None, 'trust_net':  None,
+            'dealer_net':   None, 'inst_total': None,
+            'inst_buy':     False, 'inst_sell': False,
+            'margin_bal':   None, 'short_bal':  None,
+            'margin_chg':   None, 'short_chg':  None,
+            # ─ 近 20 天收盤（sparkline）─
+            'close_20d': [round(float(c), 2) for c in close[-20:]],
+            # ─ 新聞（由 main() 補入）─
+            'news':     [],
         }
     except Exception:
         return None
 
 
-# ── 4. 批次下載 ────────────────────────────────────────────────
-def _bulk_download_chunk(tickers: list, label: str = '', retries: int = 2) -> dict:
-    """下載一批股票，回傳 {ticker: DataFrame}；失敗最多重試 retries 次"""
-    if not tickers:
-        return {}
-    data = None
-    for attempt in range(retries + 1):
-        try:
-            data = yf.download(
-                tickers, period='1y', interval='1d',
-                group_by='ticker', auto_adjust=True,
-                progress=False, threads=False
-            )
-            break
-        except Exception as e:
-            if attempt < retries:
-                wait = 5 * (attempt + 1)
-                print(f'  [WARN] Download failed ({label}), retry {attempt+1}/{retries} in {wait}s: {e}')
-                time.sleep(wait)
-            else:
-                print(f'  [WARN] Download failed ({label}) after {retries+1} attempts: {e}')
-                return {}
-
-    if data is None or data.empty:
-        return {}
-
-    # 單一股票時 columns 依然是 MultiIndex
-    top_level = data.columns.get_level_values(0).unique().tolist()
-    result = {}
+def analyze_batch(tickers: list, ticker_dfs: dict,
+                  entry_cache: dict, ticker_meta: dict) -> list:
+    """分析一批股票（純 CPU，無 I/O，可安全並行）"""
+    results = []
     for ticker in tickers:
-        if ticker not in top_level:
+        if ticker not in ticker_dfs:
             continue
+        m        = ticker_meta.get(ticker, {})
+        market   = m.get('market',   'US')
+        currency = m.get('currency', 'USD')
+        min_p    = MIN_PRICE_TW   if market == 'TW' else MIN_PRICE_US
+        min_v    = MIN_AVG_VOL_TW if market == 'TW' else MIN_AVG_VOL_US
+        r = analyze_ticker(ticker, ticker_dfs[ticker], entry_cache,
+                           min_p, min_v, market, currency)
+        if r:
+            results.append(r)
+    return results
+
+
+# ════════════════════════════════════════════════════════════════
+# 快取
+# ════════════════════════════════════════════════════════════════
+
+def load_entry_cache() -> dict:
+    if os.path.exists(CACHE_FILE):
         try:
-            df = data[ticker].copy()
-            df = df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
-            if len(df) >= 20:
-                result[ticker] = df
+            with open(CACHE_FILE, 'r') as f:
+                return json.load(f)
         except Exception:
             pass
-    return result
+    return {}
 
 
-def bulk_download_all(us_tickers: list, tw_tickers: list) -> dict:
-    """
-    分批下載 US 和 TW 股票。
-    US: 每批 DL_CHUNK_US 支；TW: 每批 DL_CHUNK_TW 支
-    """
-    result = {}
-
-    # ─ US ─
-    if us_tickers:
-        chunks = [us_tickers[i:i + DL_CHUNK_US] for i in range(0, len(us_tickers), DL_CHUNK_US)]
-        print(f'  Downloading {len(us_tickers)} US tickers in {len(chunks)} batch(es)...')
-        for idx, chunk in enumerate(chunks, 1):
-            label = f'US batch {idx}/{len(chunks)}'
-            print(f'  {label} ({len(chunk)} tickers)...', end=' ', flush=True)
-            r = _bulk_download_chunk(chunk, label)
-            result.update(r)
-            print(f'got {len(r)}')
-
-    # ─ TW ─
-    if tw_tickers:
-        chunks = [tw_tickers[i:i + DL_CHUNK_TW] for i in range(0, len(tw_tickers), DL_CHUNK_TW)]
-        print(f'  Downloading {len(tw_tickers)} TW tickers in {len(chunks)} batch(es)...')
-        for idx, chunk in enumerate(chunks, 1):
-            label = f'TW batch {idx}/{len(chunks)}'
-            print(f'  {label} ({len(chunk)} tickers)...', end=' ', flush=True)
-            r = _bulk_download_chunk(chunk, label)
-            result.update(r)
-            print(f'got {len(r)}')
-
-    print(f'  Total downloaded: {len(result)} tickers')
-    return result
+def save_entry_cache(results: list):
+    cache = {
+        r['ticker']: {'price': r['entry_price'], 'date': r.get('entry_date', '')}
+        for r in results
+        if r.get('all_green') and r.get('entry_price')
+    }
+    with open(CACHE_FILE, 'w') as f:
+        json.dump(cache, f, indent=2)
 
 
-def download_benchmarks() -> dict:
-    """下載 SPY / ^TWII / ^VIX，計算近期報酬率並回傳 VIX 現值"""
-    bench = {}
-    for sym, mkt in [('SPY', 'US'), ('^TWII', 'TW')]:
-        try:
-            df = yf.Ticker(sym).history(period='1y', interval='1d', auto_adjust=True)
-            if df is None or df.empty:
-                continue
-            c = df['Close'].values.astype(float)
-            bench[mkt] = {
-                'ret_5d':  round((c[-1]-c[-6]) /c[-6] *100, 2) if len(c)>=6  else None,
-                'ret_20d': round((c[-1]-c[-21])/c[-21]*100, 2) if len(c)>=21 else None,
-            }
-            print(f'  [Benchmark] {sym}: 5d={bench[mkt]["ret_5d"]}%  20d={bench[mkt]["ret_20d"]}%')
-        except Exception as e:
-            print(f'  [WARN] Benchmark {sym}: {e}')
-    # VIX — 用 Ticker.history() 避免 MultiIndex 問題
-    try:
-        vdf = yf.Ticker('^VIX').history(period='5d', interval='1d', auto_adjust=True)
-        if vdf is not None and not vdf.empty:
-            bench['vix'] = round(float(vdf['Close'].iloc[-1]), 2)
-            print(f'  [Benchmark] ^VIX: {bench["vix"]}')
-        else:
-            bench['vix'] = None
-    except Exception as e:
-        print(f'  [WARN] VIX: {e}')
-        bench['vix'] = None
-
-    # Put/Call Ratio — 用 SPY 選擇權（最近 3 個到期日加總）
-    try:
-        spy   = yf.Ticker('SPY')
-        exps  = spy.options[:3]          # 最近 3 個到期日
-        total_puts = total_calls = 0
-        for exp in exps:
-            chain = spy.option_chain(exp)
-            total_puts  += chain.puts['volume'].fillna(0).sum()
-            total_calls += chain.calls['volume'].fillna(0).sum()
-        if total_calls > 0:
-            bench['pc_ratio'] = round(total_puts / total_calls, 2)
-            print(f'  [Benchmark] SPY P/C Ratio: {bench["pc_ratio"]} '
-                  f'(puts={total_puts:.0f} calls={total_calls:.0f})')
-        else:
-            bench['pc_ratio'] = None
-    except Exception as e:
-        print(f'  [WARN] P/C Ratio: {e}')
-        bench['pc_ratio'] = None
-
-    return bench
-
+# ════════════════════════════════════════════════════════════════
+# 財報日期
+# ════════════════════════════════════════════════════════════════
 
 def fetch_earnings_dates(us_results: list) -> dict:
-    """
-    取得美股財報日期，回傳 {ticker: 'YYYY-MM-DD' or None}
-    只對全綠＋部分綠的標的發送請求，避免過多 API 呼叫。
-    """
-    candidates = [r['ticker'] for r in us_results
-                  if r.get('market') == 'US' and
-                     (r.get('all_green') or r.get('st1') == 1 or
-                      r.get('st2') == 1 or r.get('st3') == 1)]
+    """取得美股財報日期，回傳 {ticker: 'YYYY-MM-DD' | None}"""
+    candidates = [
+        r['ticker'] for r in us_results
+        if r.get('market') == 'US'
+        and (r.get('all_green') or r.get('st1') == 1
+             or r.get('st2') == 1 or r.get('st3') == 1)
+    ]
     result = {r['ticker']: None for r in us_results if r.get('market') == 'US'}
     if not candidates:
         return result
@@ -668,14 +299,13 @@ def fetch_earnings_dates(us_results: list) -> dict:
 
     def _fetch_one(ticker):
         try:
-            cal = yf.Ticker(ticker).calendar
-            if cal is None:
-                return ticker, None
+            cal  = yf.Ticker(ticker).calendar
             vals = []
             if isinstance(cal, pd.DataFrame) and not cal.empty:
                 if 'Earnings Date' in cal.index:
-                    raw = cal.loc['Earnings Date']
-                    vals = list(raw) if hasattr(raw, '__iter__') and not isinstance(raw, str) else [raw]
+                    raw  = cal.loc['Earnings Date']
+                    vals = list(raw) if hasattr(raw, '__iter__') \
+                           and not isinstance(raw, str) else [raw]
             elif isinstance(cal, dict):
                 ed = cal.get('Earnings Date', cal.get('earningsDate'))
                 if ed:
@@ -702,692 +332,16 @@ def fetch_earnings_dates(us_results: list) -> dict:
             done += 1
             if done % 100 == 0:
                 print(f'  Earnings: {done}/{len(candidates)}')
+
     found = sum(1 for v in result.values() if v)
     print(f'  Earnings dates found: {found}/{len(candidates)}')
     return result
 
 
-def _news_sentiment(title: str) -> dict:
-    """
-    用 VADER 對新聞標題做情緒分析。
-    回傳 {'label': 'positive'|'negative'|'neutral', 'score': float(-1~1)}
-    """
-    try:
-        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-        _news_sentiment._analyzer = getattr(_news_sentiment, '_analyzer', None) \
-                                    or SentimentIntensityAnalyzer()
-        vs = _news_sentiment._analyzer.polarity_scores(title)
-        c  = vs['compound']
-        label = 'positive' if c >= 0.05 else 'negative' if c <= -0.05 else 'neutral'
-        return {'label': label, 'score': round(c, 3)}
-    except Exception:
-        return {'label': 'neutral', 'score': 0.0}
+# ════════════════════════════════════════════════════════════════
+# Main
+# ════════════════════════════════════════════════════════════════
 
-
-def fetch_news_for_tickers(tickers: list) -> dict:
-    """
-    抓全綠美股最新 3 則新聞（yfinance Ticker.news）。
-    回傳 {ticker: [{title, url, publisher, time}]}
-    """
-    result = {}
-    if not tickers:
-        return result
-
-    def _fetch_one(ticker):
-        try:
-            raw = yf.Ticker(ticker).news
-            if not raw:
-                return ticker, []
-            items = []
-            for n in raw[:3]:
-                # 新版 yfinance (0.2.x+)：資料在 n['content'] 內
-                if 'content' in n and isinstance(n['content'], dict):
-                    c     = n['content']
-                    title = c.get('title', '')
-                    url   = (c.get('canonicalUrl') or {}).get('url', '') \
-                            or (c.get('clickThroughUrl') or {}).get('url', '')
-                    pub   = (c.get('provider') or {}).get('displayName', '')
-                    ts_str = c.get('pubDate', '') or c.get('displayTime', '')
-                    # pubDate 格式 "2026-05-09T12:27:15Z"
-                    try:
-                        from datetime import datetime, timezone
-                        ts = int(datetime.strptime(ts_str, '%Y-%m-%dT%H:%M:%SZ')
-                                 .replace(tzinfo=timezone.utc).timestamp()) if ts_str else 0
-                    except Exception:
-                        ts = 0
-                else:
-                    # 舊版 yfinance：key 直接在頂層
-                    title = n.get('title', '')
-                    url   = n.get('link', '') or n.get('url', '')
-                    pub   = n.get('publisher', '') or n.get('source', '')
-                    ts    = int(n.get('providerPublishTime', 0) or 0)
-
-                if title and url:
-                    sent = _news_sentiment(title)
-                    items.append({
-                        'title':     title,
-                        'url':       url,
-                        'publisher': pub,
-                        'time':      ts,
-                        'sentiment': sent['label'],
-                        'sent_score': sent['score'],
-                    })
-            return ticker, items[:3]
-        except Exception:
-            return ticker, []
-
-    print(f'  Fetching news for {len(tickers)} all-green US tickers...')
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        futures = {ex.submit(_fetch_one, t): t for t in tickers}
-        for f in as_completed(futures):
-            ticker, items = f.result()
-            if items:
-                result[ticker] = items
-
-    found = len(result)
-    print(f'  News fetched: {found}/{len(tickers)} tickers with news')
-    return result
-
-
-# ── 台股籌碼面資料 ────────────────────────────────────────────
-
-def _chip_date() -> str:
-    """
-    取得最新已發佈交易日字串 YYYYMMDD（以台灣時區 UTC+8 為基準）。
-    TWSE T86 資料於收盤後 ~17:00 台灣時間更新；
-    掃描於台灣時間 05:30 執行，故當日資料尚未發佈，需取前一交易日。
-    """
-    d = datetime.now(TW_TZ)
-    # 若現在是台灣時間 17:00 前，當日資料未更新，退回前一日
-    if d.hour < 17:
-        d -= timedelta(days=1)
-    # 再跳過週末
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d.strftime('%Y%m%d')
-
-
-def _chip_int(v) -> int | None:
-    """移除千分位逗號後轉整數，失敗回 None"""
-    try:
-        return int(str(v).replace(',', '').replace('+', '').strip())
-    except Exception:
-        return None
-
-
-def fetch_chip_institutional() -> dict:
-    """
-    三大法人買賣超（上市 T86 + 上櫃 web scraping）
-    回傳 {stock_code: {foreign_net, trust_net, dealer_net, inst_total, inst_buy, inst_sell}}
-    單位：張 (已除以 1000)
-
-    T86 欄位結構（2025 版）：
-      [0]  證券代號
-      [1]  證券名稱
-      [2]  外陸資買進股數(不含外資自營商)
-      [3]  外陸資賣出股數(不含外資自營商)
-      [4]  外陸資買賣超股數(不含外資自營商)   ← fi_foreign_excl
-      [5]  外資自營商買進股數
-      [6]  外資自營商賣出股數
-      [7]  外資自營商買賣超股數               ← fi_foreign_dealer
-      [8]  投信買進股數
-      [9]  投信賣出股數
-      [10] 投信買賣超股數                     ← fi_trust
-      [11] 自營商買賣超股數（合計）            ← fi_dealer
-      [12] 自營商買進股數(自行買賣)
-      [13] 自營商賣出股數(自行買賣)
-      [14] 自營商買賣超股數(自行買賣)
-      [15] 自營商買進股數(避險)
-      [16] 自營商賣出股數(避險)
-      [17] 自營商買賣超股數(避險)
-      [18] 三大法人買賣超股數                 ← fi_inst
-    """
-    result = {}
-    date_str = _chip_date()
-
-    # ─ 上市 TWSE T86 ─
-    try:
-        url = (f'https://www.twse.com.tw/rwd/zh/fund/T86'
-               f'?date={date_str}&selectType=ALL&response=json')
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
-        resp.raise_for_status()
-        jd     = resp.json()
-        fields = jd.get('fields', [])
-        rows   = jd.get('data',   [])
-
-        if fields and rows:
-            def _fi(kw, exclude=None):
-                for i, f in enumerate(fields):
-                    if kw in f:
-                        if exclude and any(ex in f for ex in exclude):
-                            continue
-                        return i
-                return -1
-
-            fi_code = _fi('代號')
-
-            # 外資合計 = 外陸資不含自營商(index 4) + 外資自營商(index 7)
-            # 用個別欄位相加，若找不到才用固定 fallback
-            fi_foreign_excl   = _fi('外陸資買賣超')          # index 4
-            fi_foreign_dealer = _fi('外資自營商買賣超')       # index 7
-
-            fi_trust  = _fi('投信買賣超')                    # index 10
-
-            # 自營商合計：排除 外資自營商、自行買賣、避險 等子欄位，取 index 11 的總計欄
-            fi_dealer = _fi('自營商買賣超', exclude=['外資', '自行買賣', '避險'])  # index 11
-
-            fi_inst = _fi('三大法人買賣超')                  # index 18
-
-            # 正確 fallback（依 2025 TWSE T86 欄位順序）
-            if fi_code           < 0: fi_code           = 0
-            if fi_foreign_excl   < 0: fi_foreign_excl   = 4
-            if fi_foreign_dealer < 0: fi_foreign_dealer = 7
-            if fi_trust          < 0: fi_trust          = 10
-            if fi_dealer         < 0: fi_dealer         = 11
-            if fi_inst           < 0: fi_inst           = 18
-
-            for row in rows:
-                code = str(row[fi_code]).strip()
-                if not code.isdigit() or len(code) != 4:
-                    continue
-                fn_excl   = _chip_int(row[fi_foreign_excl])   if fi_foreign_excl   < len(row) else None
-                fn_dealer = _chip_int(row[fi_foreign_dealer]) if fi_foreign_dealer < len(row) else None
-                tn = _chip_int(row[fi_trust])  if fi_trust  < len(row) else None
-                dn = _chip_int(row[fi_dealer]) if fi_dealer < len(row) else None
-                it = _chip_int(row[fi_inst])   if fi_inst   < len(row) else None
-
-                # 外資合計 = 不含自營商 + 外資自營商
-                fn = None
-                if fn_excl is not None or fn_dealer is not None:
-                    fn = (fn_excl or 0) + (fn_dealer or 0)
-
-                result[code] = {
-                    'foreign_net': fn // 1000 if fn is not None else None,
-                    'trust_net':   tn // 1000 if tn is not None else None,
-                    'dealer_net':  dn // 1000 if dn is not None else None,
-                    'inst_total':  it // 1000 if it is not None else None,
-                }
-        print(f'  [Chip] TWSE T86: {len(result)} stocks  (date={date_str})')
-    except Exception as e:
-        print(f'  [WARN] TWSE T86: {e}')
-
-    # ─ 上櫃 TPEx — FinMind API ─
-    # FinMind 全球可存取，覆蓋上市+上櫃，這裡只補上 TWSE T86 未含的上櫃股票
-    # 需設定環境變數 FINMIND_TOKEN（免費版每日 600 次）
-    finmind_token = os.environ.get('FINMIND_TOKEN', '')
-    if finmind_token:
-        try:
-            from collections import defaultdict
-            date_iso = datetime.strptime(date_str, '%Y%m%d').strftime('%Y-%m-%d')
-            url = 'https://api.finmindtrade.com/api/v4/data'
-            params = {
-                'dataset':    'TaiwanStockInstitutionalInvestorsBuySell',
-                'start_date': date_iso,
-                'end_date':   date_iso,
-                'token':      finmind_token,
-            }
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=40)
-            resp.raise_for_status()
-            jd = resp.json()
-            if jd.get('status') != 200:
-                raise ValueError(f'FinMind status={jd.get("status")} msg={jd.get("msg")}')
-
-            # 依 stock_id 彙整各類法人（buy/sell 單位：股，÷1000 → 張）
-            fm_data: dict = defaultdict(lambda: {
-                'foreign': 0, 'trust': 0,
-                'dealer': 0,  'has_dealer_total': False,
-                'dealer_sub': 0,
-            })
-            for row in jd.get('data', []):
-                code = str(row.get('stock_id', '')).strip()
-                if not code.isdigit() or len(code) != 4:
-                    continue
-                if code in result:          # 已由 TWSE T86 涵蓋，跳過
-                    continue
-                investor = row.get('name', '')
-                buy  = _chip_int(row.get('buy',  0)) or 0
-                sell = _chip_int(row.get('sell', 0)) or 0
-                net  = buy - sell
-                d    = fm_data[code]
-                if investor in ('Foreign_Investor', 'Foreign_Dealer_Self'):
-                    d['foreign'] += net
-                elif investor == 'Investment_Trust':
-                    d['trust'] = net
-                elif investor == 'Dealer':
-                    d['dealer'] = net
-                    d['has_dealer_total'] = True
-                elif investor in ('Dealer_Self', 'Dealer_Hedging'):
-                    d['dealer_sub'] += net   # 備用：若無 Dealer 總計欄
-
-            tpex_cnt = 0
-            for code, d in fm_data.items():
-                fn = d['foreign']
-                tn = d['trust']
-                dn = d['dealer'] if d['has_dealer_total'] else d['dealer_sub']
-                it = fn + tn + dn
-                result[code] = {
-                    'foreign_net': fn // 1000,
-                    'trust_net':   tn // 1000,
-                    'dealer_net':  dn // 1000,
-                    'inst_total':  it // 1000,
-                }
-                tpex_cnt += 1
-            print(f'  [Chip] FinMind TPEx Institution: {tpex_cnt} stocks  (date={date_iso})')
-        except Exception as e:
-            print(f'  [WARN] FinMind Institution: {e}')
-    else:
-        print('  [INFO] FINMIND_TOKEN not set; TPEx institution chip skipped')
-
-    # 衍生：外資+投信同向訊號
-    for d in result.values():
-        fn = d.get('foreign_net') or 0
-        tn = d.get('trust_net')   or 0
-        d['inst_buy']  = bool(fn > 0 and tn > 0)
-        d['inst_sell'] = bool(fn < 0 and tn < 0)
-
-    return result
-
-
-def fetch_chip_margin() -> dict:
-    """
-    融資融券餘額（上市 MI_MARGN + 上櫃 web scraping）
-    回傳 {stock_code: {margin_bal, short_bal, margin_chg, short_chg}}
-    單位：張
-
-    MI_MARGN 回應結構（2025 版）：
-      jd['tables'][1]['data'] 才是個股資料（非 jd['data']）
-      欄位：[0]=代號 [1]=名稱
-            [2]=融資買進  [3]=融資賣出  [4]=融資現金償還
-            [5]=融資前日餘額  [6]=融資今日餘額  [7]=次一營業日限額(融資)
-            [8]=融券買進  [9]=融券賣出  [10]=融券現券償還
-            [11]=融券前日餘額 [12]=融券今日餘額 [13]=次一營業日限額(融券)
-            [14]=資券互抵  [15]=註記
-    """
-    result   = {}
-    date_str = _chip_date()
-
-    # ─ 上市 TWSE MI_MARGN ─
-    try:
-        url = (f'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN'
-               f'?date={date_str}&selectType=ALL&response=json')
-        resp = requests.get(url, headers=_HEADERS, timeout=30)
-        resp.raise_for_status()
-        jd = resp.json()
-
-        # 2025 版：個股資料在 tables[1]['data']，不是頂層 data
-        tables = jd.get('tables', [])
-        if len(tables) >= 2:
-            rows = tables[1].get('data', [])
-        else:
-            rows = jd.get('data', [])   # 舊格式相容
-
-        for row in rows:
-            try:
-                code = str(row[0]).strip()
-                if not code.isdigit() or len(code) != 4:
-                    continue
-                # 欄位位置（對應 2025 MI_MARGN tables[1]）:
-                #   [2]=融資買進  [3]=融資賣出  [6]=融資今日餘額
-                #   [8]=融券買進  [9]=融券賣出  [12]=融券今日餘額
-                mb  = _chip_int(row[2])
-                ms  = _chip_int(row[3])
-                mbl = _chip_int(row[6])
-                sb  = _chip_int(row[8])
-                ss  = _chip_int(row[9])
-                sbl = _chip_int(row[12])
-                result[code] = {
-                    'margin_bal': mbl,
-                    'short_bal':  sbl,
-                    'margin_chg': (mb - ms) if mb is not None and ms is not None else None,
-                    'short_chg':  (ss - sb) if ss is not None and sb is not None else None,
-                }
-            except (IndexError, Exception):
-                continue
-        print(f'  [Chip] TWSE MI_MARGN: {len(result)} stocks')
-    except Exception as e:
-        print(f'  [WARN] TWSE MI_MARGN: {e}')
-
-    # ─ 上櫃 TPEx — FinMind API ─
-    # TaiwanStockMarginPurchaseShortSale：欄位單位為「張」，不需再 ÷1000
-    finmind_token = os.environ.get('FINMIND_TOKEN', '')
-    if finmind_token:
-        try:
-            date_iso = datetime.strptime(date_str, '%Y%m%d').strftime('%Y-%m-%d')
-            url = 'https://api.finmindtrade.com/api/v4/data'
-            params = {
-                'dataset':    'TaiwanStockMarginPurchaseShortSale',
-                'start_date': date_iso,
-                'end_date':   date_iso,
-                'token':      finmind_token,
-            }
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=40)
-            resp.raise_for_status()
-            jd = resp.json()
-            if jd.get('status') != 200:
-                raise ValueError(f'FinMind status={jd.get("status")} msg={jd.get("msg")}')
-
-            tpex_cnt = 0
-            for row in jd.get('data', []):
-                code = str(row.get('stock_id', '')).strip()
-                if not code.isdigit() or len(code) != 4:
-                    continue
-                if code in result:      # 已由 TWSE MI_MARGN 涵蓋，跳過
-                    continue
-                mb  = _chip_int(row.get('MarginPurchaseBuy',         0)) or 0
-                ms  = _chip_int(row.get('MarginPurchaseSell',        0)) or 0
-                mbl = _chip_int(row.get('MarginPurchaseTodayBalance', None))
-                sb  = _chip_int(row.get('ShortSaleBuy',              0)) or 0
-                ss  = _chip_int(row.get('ShortSaleSell',             0)) or 0
-                sbl = _chip_int(row.get('ShortSaleTodayBalance',     None))
-                result[code] = {
-                    'margin_bal': mbl,
-                    'short_bal':  sbl,
-                    'margin_chg': mb - ms,
-                    'short_chg':  ss - sb,
-                }
-                tpex_cnt += 1
-            print(f'  [Chip] FinMind TPEx Margin: {tpex_cnt} stocks  (date={date_iso})')
-        except Exception as e:
-            print(f'  [WARN] FinMind Margin: {e}')
-    else:
-        print('  [INFO] FINMIND_TOKEN not set; TPEx margin chip skipped')
-
-    return result
-
-
-def analyze_batch(tickers: list, ticker_dfs: dict,
-                  entry_cache: dict, ticker_meta: dict) -> list:
-    """分析一批股票（純 CPU，無 I/O，可安全並行）"""
-    results = []
-    for ticker in tickers:
-        if ticker not in ticker_dfs:
-            continue
-        m        = ticker_meta.get(ticker, {})
-        market   = m.get('market',   'US')
-        currency = m.get('currency', 'USD')
-        min_p    = MIN_PRICE_TW   if market == 'TW' else MIN_PRICE_US
-        min_v    = MIN_AVG_VOL_TW if market == 'TW' else MIN_AVG_VOL_US
-        r = analyze_ticker(ticker, ticker_dfs[ticker], entry_cache,
-                           min_p, min_v, market, currency)
-        if r:
-            results.append(r)
-    return results
-
-
-# ── 5. 快取 ───────────────────────────────────────────────────
-def load_entry_cache() -> dict:
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def save_entry_cache(results: list):
-    cache = {}
-    for r in results:
-        if r.get('all_green') and r.get('entry_price'):
-            cache[r['ticker']] = {
-                'price': r['entry_price'],
-                'date':  r.get('entry_date', ''),
-            }
-    with open(CACHE_FILE, 'w') as f:
-        json.dump(cache, f, indent=2)
-
-
-# ── 6. 生成 HTML 儀表板 ────────────────────────────────────────
-def _fetch_us_fundamentals(tickers: list) -> dict:
-    """抓取美股基本面資料，每支約 1-2 秒，最多抓 20 支。"""
-    result = {}
-    _KEY_SETS = {
-        'pe':           ['trailingPE', 'trailingP/E'],
-        'fwd_pe':       ['forwardPE',  'forwardP/E'],
-        'eps':          ['trailingEps', 'epsTrailingTwelveMonths'],
-        'eps_growth':   ['earningsGrowth', 'earningsQuarterlyGrowth'],
-        'rev_growth':   ['revenueGrowth',  'quarterlyRevenueGrowth'],
-        'gross_margin': ['grossMargins',   'grossProfitMargins'],
-    }
-    def pct(v):
-        return f"{v*100:.1f}%" if v is not None else '—'
-    def num(v):
-        return f"{v:.1f}" if v is not None else '—'
-
-    for t in tickers[:20]:
-        try:
-            info = yf.Ticker(t).info
-            # 首次只印第一支股票的 key，方便 debug
-            if t == tickers[0]:
-                filled = {k: v for k, v in info.items() if v is not None and k in
-                          ['trailingPE','forwardPE','earningsGrowth','revenueGrowth',
-                           'grossMargins','trailingEps','epsTrailingTwelveMonths']}
-                print(f'  [Fundamentals] {t} sample keys: {filled}')
-
-            def pick(keys):
-                for k in keys:
-                    v = info.get(k)
-                    if v is not None:
-                        return v
-                return None
-
-            pe_val  = pick(_KEY_SETS['pe'])
-            fpe_val = pick(_KEY_SETS['fwd_pe'])
-            eps_val = pick(_KEY_SETS['eps'])
-            eg_val  = pick(_KEY_SETS['eps_growth'])
-            rg_val  = pick(_KEY_SETS['rev_growth'])
-            gm_val  = pick(_KEY_SETS['gross_margin'])
-
-            # PE 不可用時：若 EPS 為負表示虧損，給出明確說明而非空白
-            if pe_val is not None:
-                pe_str = num(pe_val)
-            elif eps_val is not None and eps_val < 0:
-                pe_str = f'虧損中(EPS={eps_val:.2f})'
-            elif eps_val is not None:
-                # EPS > 0 但 PE 抓不到（罕見），嘗試從現價推算
-                cur_price = info.get('currentPrice') or info.get('regularMarketPrice')
-                if cur_price and eps_val > 0:
-                    pe_str = f'{cur_price/eps_val:.1f}(估)'
-                else:
-                    pe_str = '—'
-            else:
-                pe_str = '—'
-
-            result[t] = {
-                'pe':           pe_str,
-                'fwd_pe':       num(fpe_val),
-                'eps_growth':   pct(eg_val)  if eg_val  and abs(eg_val) < 100 else '—',
-                'rev_growth':   pct(rg_val)  if rg_val  and abs(rg_val) < 100 else '—',
-                'gross_margin': pct(gm_val)  if gm_val  else '—',
-            }
-        except Exception as e:
-            print(f'  [WARN] Fundamentals {t}: {e}')
-            result[t] = {}
-    return result
-
-
-def analyze_with_gemini(results: list, vix: float | None, pc_ratio: float | None = None) -> str:
-    """用 Gemini REST API 分析全綠股票：美股基本面、台股籌碼面。"""
-    api_key = os.environ.get('GEMINI_API_KEY', '')
-    if not api_key:
-        return ''
-    try:
-        from collections import Counter
-        all_green  = [r for r in results if r.get('all_green')]
-        just_green = [r for r in results if r.get('today_change') == 'to_green']
-        us_green   = sorted([r for r in all_green if r.get('market') == 'US'],
-                            key=lambda x: x.get('rs_20d') or -9999, reverse=True)
-        tw_green   = sorted([r for r in all_green if r.get('market') == 'TW'],
-                            key=lambda x: (x.get('inst_total') or 0), reverse=True)
-
-        sector_cnt  = Counter(r.get('sector', 'Unknown') for r in all_green)
-        top_sectors = ', '.join(f"{s}({n})" for s, n in sector_cnt.most_common(5))
-
-        # ── 美股：抓基本面（超額報酬最高前20支）──
-        print(f'  [Gemini] Fetching fundamentals for top {min(20,len(us_green))} US stocks...')
-        us_fundamentals = _fetch_us_fundamentals([r['ticker'] for r in us_green])
-
-        def fmt_us(lst):
-            rows = []
-            for r in lst[:20]:
-                t = r['ticker']
-                f = us_fundamentals.get(t, {})
-                news_items = r.get('news') or []
-                news_str = ''
-                if news_items:
-                    headlines = '｜'.join(n['title'][:50] for n in news_items[:2])
-                    news_str = f'\n      近期新聞：{headlines}'
-                rows.append(
-                    f"  {t} ({r.get('sector','?')}) "
-                    f"PE={f.get('pe','—')} FwdPE={f.get('fwd_pe','—')} "
-                    f"EPS成長={f.get('eps_growth','—')} 營收成長={f.get('rev_growth','—')} 毛利率={f.get('gross_margin','—')} "
-                    f"| RS={r.get('rs_20d','—')} RSI={r.get('rsi','—')}"
-                    f"{news_str}"
-                )
-            return '\n'.join(rows) if rows else '  （無）'
-
-        # ── 台股：整理籌碼面 ──
-        def fmt_tw(lst):
-            rows = []
-            def m(v):
-                """將張數格式化為可讀字串（帶正負號）"""
-                if v is None: return '—'
-                if v == 0: return '持平'
-                sign = '+' if v > 0 else ''
-                av = abs(v)
-                if av >= 10000: return f'{sign}{v/10000:.1f}萬張'
-                if av >= 1000:  return f'{sign}{v/1000:.1f}K張'
-                return f'{sign}{v}張'
-            for r in lst[:20]:
-                rows.append(
-                    f"  {r['ticker']} ({r.get('sector','?')}) "
-                    f"外資{m(r.get('foreign_net'))} 投信{m(r.get('trust_net'))} 自營{m(r.get('dealer_net'))} "
-                    f"法人{'買超' if r.get('inst_buy') else ('賣超' if r.get('inst_sell') else '—')} "
-                    f"融資變化{m(r.get('margin_chg'))} 融券變化{m(r.get('short_chg'))}"
-                )
-            return '\n'.join(rows) if rows else '  （無）'
-
-        prompt = f"""你是一位專業股票市場分析師，請用**繁體中文**分析以下今日三重超級趨勢（Triple Supertrend）全綠掃描結果。
-
-=== 市場概況 ===
-VIX：{vix if vix else '無資料'} | SPY Put/Call Ratio：{pc_ratio if pc_ratio else '無資料'} | 全綠：{len(all_green)}支（美股{len(us_green)} / 台股{len(tw_green)}）| 今日新轉綠：{len(just_green)}支
-強勢產業：{top_sectors or '無'}
-Put/Call 解讀：P/C > 1.2 市場偏恐慌（逆向看漲）；P/C < 0.7 市場過樂觀（留意回調風險）
-
-=== 美股全綠 TOP 20（依超額報酬排序，附基本面）===
-{fmt_us(us_green)}
-
-=== 台股全綠 TOP 20（依法人買超排序，附籌碼面）===
-{fmt_tw(tw_green)}
-
-請依以下結構輸出分析，每個區塊用 ## 標題：
-
-## 整體市場情緒
-根據 VIX、Put/Call Ratio 與全綠數量，綜合判斷市場多頭強度與情緒極端值。
-
-## 美股基本面亮點
-針對上方美股個股，點出基本面最強（低 PE + 高成長）與需留意（PE 過高或成長趨緩）的標的，每支 1 句。
-
-## 台股籌碼面亮點
-針對上方台股個股，點出籌碼最集中（外資/投信同步買超 + 融資收斂）與需留意（籌碼分散）的標的，每支 1 句。
-
-## 美股新聞亮點
-針對上方有附近期新聞的美股個股，結合新聞事件與技術面（是否全綠、RS強弱）給出短評，每支 1 句。若無新聞則略過此區塊。
-
-## 今日新轉綠訊號
-今日新進場訊號有何值得關注之處。
-
-## 風險提示與操作建議
-綜合以上，給出風險提示與整體操作建議。
-
-請用 Markdown 格式，不要加額外說明。"""
-
-        # 動態取得可用的 flash model
-        list_url = f'https://generativelanguage.googleapis.com/v1beta/models?key={api_key}'
-        list_resp = requests.get(list_url, timeout=30)
-        list_resp.raise_for_status()
-        all_models = list_resp.json().get('models', [])
-        # 優先選 flash（速度快、免費額度多），過濾支援 generateContent 的
-        candidates = [
-            m['name'].replace('models/', '')
-            for m in all_models
-            if 'generateContent' in m.get('supportedGenerationMethods', [])
-            and 'flash' in m['name'].lower()
-            and 'lite' not in m['name'].lower()  # 先排除 lite，畫質較差
-        ]
-        # 若無 flash 則取任何支援 generateContent 的
-        if not candidates:
-            candidates = [
-                m['name'].replace('models/', '')
-                for m in all_models
-                if 'generateContent' in m.get('supportedGenerationMethods', [])
-            ]
-        print(f'  [Gemini] Available flash models: {candidates[:5]}')
-
-        # thinkingConfig 只有 gemini-2.5 thinking 模型才支援，一律不帶以保持相容性
-        payload = {
-            'contents': [{'parts': [{'text': prompt}]}],
-            'generationConfig': {
-                'maxOutputTokens': 8192,
-                'temperature': 0.4,
-            }
-        }
-
-        for model_name in candidates[:3]:
-            url = (
-                'https://generativelanguage.googleapis.com/v1beta/models/'
-                f'{model_name}:generateContent?key={api_key}'
-            )
-            try:
-                resp = requests.post(url, json=payload, timeout=60)
-                print(f'  [Gemini] {model_name} status={resp.status_code}')
-                if resp.status_code != 200:
-                    print(f'  [Gemini] response: {resp.text[:200]}')
-                    continue
-                text = resp.json()['candidates'][0]['content']['parts'][0]['text'].strip()
-                print(f'  [Gemini] Analysis done via {model_name} ({len(text)} chars)')
-                return text
-            except Exception as e:
-                print(f'  [WARN] Gemini {model_name} failed: {e}')
-                continue
-        return ''
-    except Exception as e:
-        print(f'  [WARN] Gemini analysis failed: {e}')
-        return ''
-
-
-def generate_html(results: list, scan_time: str, ticker_meta: dict, vix: float | None = None, pc_ratio: float | None = None) -> str:
-    # 補入名稱/產業/市場資訊
-    for r in results:
-        m = ticker_meta.get(r['ticker'], {})
-        r['sector']   = m.get('sector',   'Unknown')
-        r['name']     = m.get('name',     r['ticker'])
-        r['market']   = r.get('market',   m.get('market', 'US'))
-        r['currency'] = r.get('currency', m.get('currency', 'USD'))
-
-    # 排序：全綠優先 → 依損益降序
-    results.sort(key=lambda x: (not x['all_green'], -(x['pnl_pct'] or -9999)))
-
-    data_json = json.dumps(results, ensure_ascii=False)
-
-    template_path = Path(__file__).parent / 'template.html'
-    TEMPLATE = template_path.read_text(encoding='utf-8')
-
-    vix_str     = str(vix) if vix is not None else 'null'
-    pc_str      = str(pc_ratio) if pc_ratio is not None else 'null'
-    ai_analysis = analyze_with_gemini(results, vix, pc_ratio)
-    # 反引號和 ${ 會破壞 JS template literal，需要 escape
-    ai_safe = ai_analysis.replace('\\', '\\\\').replace('`', '\\`').replace('${', '\\${')
-    result = (TEMPLATE
-              .replace('__SCAN_TIME__', scan_time)
-              .replace('__DATA_JSON__', data_json)
-              .replace('__VIX_VALUE__', vix_str)
-              .replace('__PC_VALUE__', pc_str)
-              .replace('__AI_ANALYSIS__', ai_safe))
-    return result
-
-
-# ── Main ──────────────────────────────────────────────────────
 def main():
     print('=' * 60)
     print('  Triple Supertrend Scanner')
@@ -1397,15 +351,14 @@ def main():
     # Step 1: 取得股票清單
     print('\n[1/4] Fetching ticker lists...')
     ticker_meta = get_tickers_with_meta()
-
     if not ticker_meta:
         print('  [WARN] All fetches failed, using US fallback list')
         from _fallback_tickers import TICKERS
         ticker_meta = {t: {'name': t, 'sector': 'Unknown', 'market': 'US', 'currency': 'USD'}
                        for t in TICKERS}
 
-    us_tickers = [t for t, m in ticker_meta.items() if m.get('market') == 'US']
-    tw_tickers = [t for t, m in ticker_meta.items() if m.get('market') == 'TW']
+    us_tickers  = [t for t, m in ticker_meta.items() if m.get('market') == 'US']
+    tw_tickers  = [t for t, m in ticker_meta.items() if m.get('market') == 'TW']
     all_tickers = list(ticker_meta.keys())
     print(f'  US: {len(us_tickers)} | TW: {len(tw_tickers)} | Total: {len(all_tickers)}')
 
@@ -1415,14 +368,14 @@ def main():
     print(f'  Cache: {len(entry_cache)} records')
 
     # Step 3a: 批次下載
-    print(f'\n[3/4] Downloading market data...')
+    print('\n[3/4] Downloading market data...')
     ticker_dfs = bulk_download_all(us_tickers, tw_tickers)
 
-    print('  Downloading benchmarks (SPY + ^TWII)...')
+    print('  Downloading benchmarks (SPY + ^TWII + ^VIX)...')
     bench_ret = download_benchmarks()
 
     # Step 3b: 並行分析（純 CPU）
-    batches = [all_tickers[i:i + BATCH_SIZE] for i in range(0, len(all_tickers), BATCH_SIZE)]
+    batches     = [all_tickers[i:i + BATCH_SIZE] for i in range(0, len(all_tickers), BATCH_SIZE)]
     all_results = []
     done_count  = 0
     total       = len(all_tickers)
@@ -1449,7 +402,7 @@ def main():
                 f'  {done_count:>4}/{total} ({pct:4.0f}%) '
                 f'| valid:{len(all_results):>4} (US:{us_valid} TW:{tw_valid}) '
                 f'| green:{green_now:>3}',
-                end='\r'
+                end='\r',
             )
 
     # 補入超額報酬 rs_20d（個股 ret_20d − 大盤 ret_20d）
@@ -1460,8 +413,8 @@ def main():
         if r20 is not None and b20 is not None:
             r['rs_20d'] = round(r20 - b20, 2)
 
-    # 補入台股籌碼面資料
-    print('  Fetching TW chip data (三大法人 + 融資融券)...')
+    # 補入台股籌碼面
+    print('\n  Fetching TW chip data (三大法人 + 融資融券)...')
     try:
         chip_inst   = fetch_chip_institutional()
         chip_margin = fetch_chip_margin()
@@ -1472,16 +425,18 @@ def main():
             code = r['ticker'].split('.')[0]
             ci   = chip_inst.get(code,   {})
             cm   = chip_margin.get(code, {})
-            r['foreign_net'] = ci.get('foreign_net')
-            r['trust_net']   = ci.get('trust_net')
-            r['dealer_net']  = ci.get('dealer_net')
-            r['inst_total']  = ci.get('inst_total')
-            r['inst_buy']    = ci.get('inst_buy',  False)
-            r['inst_sell']   = ci.get('inst_sell', False)
-            r['margin_bal']  = cm.get('margin_bal')
-            r['short_bal']   = cm.get('short_bal')
-            r['margin_chg']  = cm.get('margin_chg')
-            r['short_chg']   = cm.get('short_chg')
+            r.update({
+                'foreign_net': ci.get('foreign_net'),
+                'trust_net':   ci.get('trust_net'),
+                'dealer_net':  ci.get('dealer_net'),
+                'inst_total':  ci.get('inst_total'),
+                'inst_buy':    ci.get('inst_buy',  False),
+                'inst_sell':   ci.get('inst_sell', False),
+                'margin_bal':  cm.get('margin_bal'),
+                'short_bal':   cm.get('short_bal'),
+                'margin_chg':  cm.get('margin_chg'),
+                'short_chg':   cm.get('short_chg'),
+            })
             if ci or cm:
                 chip_merged += 1
         print(f'  [Chip] Merged into {chip_merged} TW stocks')
@@ -1499,17 +454,15 @@ def main():
     for r in all_results:
         r['earnings_date'] = earnings_map.get(r['ticker'])
 
-    # Step 3d: 美股新聞（全綠標的）
+    # Step 3d: 美股新聞（全綠）
     print('\n[3d] Fetching news for all-green US tickers...')
-    all_green_us_tickers = [
-        r['ticker'] for r in all_results
-        if r.get('all_green') and r.get('market') == 'US'
-    ]
-    news_map = fetch_news_for_tickers(all_green_us_tickers)
+    all_green_us = [r['ticker'] for r in all_results
+                    if r.get('all_green') and r.get('market') == 'US']
+    news_map = fetch_news_for_tickers(all_green_us)
     for r in all_results:
         r['news'] = news_map.get(r['ticker'], [])
 
-    # Step 4: 儲存結果
+    # Step 4: 儲存
     print('\n[4/4] Saving results...')
     save_entry_cache(all_results)
 
@@ -1517,9 +470,9 @@ def main():
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
     scan_time = datetime.now(TW_TZ).strftime('%Y-%m-%d %H:%M (UTC+8)')
-    vix_val   = bench_ret.get('vix')
-    pc_val    = bench_ret.get('pc_ratio')
-    html = generate_html(all_results, scan_time, ticker_meta, vix_val, pc_val)
+    html = generate_html(all_results, scan_time, ticker_meta,
+                         vix=bench_ret.get('vix'),
+                         pc_ratio=bench_ret.get('pc_ratio'))
     with open(OUTPUT_HTML, 'w', encoding='utf-8') as f:
         f.write(html)
 
