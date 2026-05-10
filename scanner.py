@@ -33,12 +33,12 @@ if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 # ── 子模組 ─────────────────────────────────────────────────────
-from indicators      import calc_supertrend, compute_factor_scores
-from ticker_fetcher  import get_tickers_with_meta
-from data_handler    import bulk_download_all, download_benchmarks
-from chip_data       import fetch_chip_institutional, fetch_chip_margin
-from news_fetcher    import fetch_news_for_tickers
-from report_generator import generate_html
+from indicators       import calc_supertrend, compute_factor_scores
+from ticker_fetcher   import get_tickers_with_meta
+from data_handler     import bulk_download_all, download_benchmarks
+from chip_data        import fetch_chip_institutional, fetch_chip_margin
+from news_fetcher     import fetch_news_for_tickers
+from report_generator import generate_html, fetch_us_fundamentals_bulk
 
 TW_TZ = timezone(timedelta(hours=8))
 
@@ -231,6 +231,12 @@ def analyze_ticker(ticker: str, df: pd.DataFrame, entry_cache: dict,
             'close_20d': [round(float(c), 2) for c in close[-20:]],
             # ─ 新聞（由 main() 補入）─
             'news':     [],
+            # ─ 基本面（美股由 main() 補入，TW 維持 None）─
+            'pe':           None,
+            'fwd_pe':       None,
+            'eps_growth':   None,
+            'rev_growth':   None,
+            'gross_margin': None,
         }
     except Exception:
         return None
@@ -461,6 +467,23 @@ def main():
     news_map = fetch_news_for_tickers(all_green_us)
     for r in all_results:
         r['news'] = news_map.get(r['ticker'], [])
+
+    # Step 3e: 美股基本面（全綠 + 今日新轉綠）
+    print('\n[3e] Fetching US fundamentals (value/growth/quality)...')
+    fund_candidates = [
+        r['ticker'] for r in all_results
+        if r.get('market') == 'US'
+        and (r.get('all_green') or r.get('today_change') == 'to_green')
+    ]
+    if fund_candidates:
+        us_fund = fetch_us_fundamentals_bulk(fund_candidates)
+        merged_fund = 0
+        for r in all_results:
+            if r.get('market') == 'US' and r['ticker'] in us_fund:
+                r.update(us_fund[r['ticker']])
+                if us_fund[r['ticker']].get('pe') is not None:
+                    merged_fund += 1
+        print(f'  [Fundamentals] Merged PE into {merged_fund} US stocks')
 
     # Step 4: 儲存
     print('\n[4/4] Saving results...')

@@ -6,11 +6,63 @@ import json
 import os
 import requests
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
 # ════════════════════════════════════════════════════════════════
-# 美股基本面
+# 美股基本面（bulk raw，供 scanner 存入 results.json）
+# ════════════════════════════════════════════════════════════════
+
+def fetch_us_fundamentals_bulk(tickers: list) -> dict:
+    """
+    批次抓取美股基本面 raw 數值（供 scanner.py 存入 results.json）。
+    回傳 {ticker: {pe, fwd_pe, eps_growth, rev_growth, gross_margin}} (均為 float|None)
+    """
+    _KEY_SETS = {
+        'pe':           ['trailingPE'],
+        'fwd_pe':       ['forwardPE'],
+        'eps_growth':   ['earningsGrowth', 'earningsQuarterlyGrowth'],
+        'rev_growth':   ['revenueGrowth',  'quarterlyRevenueGrowth'],
+        'gross_margin': ['grossMargins',   'grossProfitMargins'],
+    }
+
+    def _pick(info, keys):
+        for k in keys:
+            v = info.get(k)
+            if v is not None and isinstance(v, (int, float)) and not (v != v):  # not NaN
+                return float(v)
+        return None
+
+    def _fetch_one(ticker):
+        try:
+            info = yf.Ticker(ticker).info
+            return ticker, {k: _pick(info, ks) for k, ks in _KEY_SETS.items()}
+        except Exception:
+            return ticker, {k: None for k in _KEY_SETS}
+
+    result: dict = {}
+    if not tickers:
+        return result
+
+    print(f'  [Fundamentals] Fetching {len(tickers)} US tickers...')
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(_fetch_one, t): t for t in tickers}
+        done = 0
+        for f in as_completed(futures):
+            ticker, data = f.result()
+            result[ticker] = data
+            done += 1
+            if done % 30 == 0:
+                print(f'  [Fundamentals] {done}/{len(tickers)}')
+
+    found = sum(1 for v in result.values() if v.get('pe') is not None)
+    print(f'  [Fundamentals] Done: {found}/{len(tickers)} with PE data')
+    return result
+
+
+# ════════════════════════════════════════════════════════════════
+# 美股基本面（格式化字串，供 Gemini prompt 用）
 # ════════════════════════════════════════════════════════════════
 
 def _fetch_us_fundamentals(tickers: list) -> dict:

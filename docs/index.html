@@ -650,19 +650,19 @@ tr.row-l3 td{background:rgba(245,200,66,.03)}
 
   <!-- 結果表格 -->
   <div class="table-wrap">
-    <table id="factorTable" style="min-width:1000px">
+    <table id="factorTable" style="min-width:1060px">
       <thead>
         <tr>
           <th class="sortable" onclick="sortFactor('ticker',this)">代號</th>
           <th>名稱</th>
           <th class="sortable" onclick="sortFactor('price',this)">現價 / 1d%</th>
-          <th class="sortable" onclick="sortFactor('_layersPassed',this)">通過層次 ↓</th>
-          <th class="sortable" onclick="sortFactor('_stScore',this)">ST</th>
-          <th class="sortable" onclick="sortFactor('_macdScore',this)">MACD 週線</th>
-          <th class="sortable" onclick="sortFactor('adx',this)">ADX / RSI</th>
-          <th class="sortable" onclick="sortFactor('rs_20d',this)">超額報酬</th>
+          <th class="sortable" onclick="sortFactor('_layersPassed',this)">層次 ↓</th>
+          <th class="sortable" onclick="sortFactor('_momScore',this)" title="RS超額報酬 + MACD週線 + RSI甜蜜區">🟣 動能</th>
+          <th class="sortable" onclick="sortFactor('_qualScore',this)" title="毛利率 + ADX趨勢強度（TW用法人買超）">🟡 品質</th>
+          <th class="sortable" onclick="sortFactor('_growScore',this)" title="EPS成長 + 營收成長（TW用20日/5日報酬）">🟢 成長</th>
+          <th class="sortable" onclick="sortFactor('_valScore',this)" title="Forward PE + PE（TW用52週位階+籌碼）">🔵 價值</th>
           <th>風控</th>
-          <th class="sortable" onclick="sortFactor('_compositeScore',this)">得分</th>
+          <th class="sortable" onclick="sortFactor('_compositeScore',this)">總分/12</th>
           <th>市場</th>
         </tr>
       </thead>
@@ -1232,45 +1232,96 @@ let _factorFilter = { mkt: 'all', layer: 'all', q: '' };
 
 function buildFactorPanel() {
   _factorData = RAW.map(r => {
-    // ── 各因子計算 ──────────────────────────────────────────
-    // ST 因子 (0-2)
-    const _stScore = r.all_green ? 2 : (r.st1===1||r.st2===1||r.st3===1) ? 1 : 0;
+    const isTW = r.market === 'TW' || r.market === 'TWSE' || r.market === 'TPEX';
 
-    // MACD 週線（有後端資料用後端；無則 ret_5d 代理，標記來源）
+    // ── MACD 週線（後端資料優先，無則 ret_5d 代理）──
     let _macdScore = 0, _macdProxy = false;
     if (r.macd_weekly != null) {
-      _macdScore = r.macd_weekly > 0 ? 1 : -1;
+      _macdScore = r.macd_weekly > 0 ? 1 : 0;
     } else {
       _macdProxy = true;
       _macdScore = (r.ret_5d != null && r.ret_5d > 0) ? 1 : 0;
     }
 
-    // ADX > 25 趨勢強度
-    const _adxScore = (r.adx != null && r.adx > 25) ? 1 : 0;
-    // RSI 甜蜜區 50-70
-    const _rsiScore = (r.rsi != null && r.rsi >= 50 && r.rsi <= 70) ? 1 : 0;
-    // 超額報酬動能
-    const _momScore = (r.rs_20d != null && r.rs_20d > 0) ? 1 : 0;
+    // ════════════════════════════════════════════════════
+    // 🟣 動能 Momentum (0-3)
+    //    RS超額報酬 + MACD週線 + RSI甜蜜區
+    // ════════════════════════════════════════════════════
+    const _momRS   = (r.rs_20d != null && r.rs_20d > 0) ? 1 : 0;
+    const _momMACD = _macdScore;
+    const _momRSI  = (r.rsi != null && r.rsi >= 50 && r.rsi <= 70) ? 1 : 0;
+    const _momScore = _momRS + _momMACD + _momRSI;
 
-    // 綜合得分 max 6
-    const _compositeScore = _stScore + Math.max(0, _macdScore) + _adxScore + _rsiScore + _momScore;
+    // ════════════════════════════════════════════════════
+    // 🟡 品質 Quality (0-3)
+    //    US：毛利率(0-2) + ADX(1)
+    //    TW：法人買超(0-2) + ADX(1)
+    // ════════════════════════════════════════════════════
+    let _qualGM = 0;
+    if (!isTW) {
+      if      (r.gross_margin != null && r.gross_margin > 0.5) _qualGM = 2;
+      else if (r.gross_margin != null && r.gross_margin > 0.3) _qualGM = 1;
+    } else {
+      if      (r.inst_buy)  _qualGM = 2;
+      else if (!r.inst_sell && r.inst_total != null && r.inst_total > 0) _qualGM = 1;
+    }
+    const _qualADX  = (r.adx != null && r.adx > 25) ? 1 : 0;
+    const _qualScore = _qualGM + _qualADX;
 
-    // ── 四層判斷 ────────────────────────────────────────────
-    // L1 粗篩：已由後端完成（所有 RAW 都通過）
+    // ════════════════════════════════════════════════════
+    // 🟢 成長 Growth (0-3)
+    //    US：EPS成長(0-2) + 營收成長(1)
+    //    TW：20日報酬(0-2) + 5日報酬(1)
+    // ════════════════════════════════════════════════════
+    let _growEPS = 0, _growRev = 0;
+    if (!isTW) {
+      if      (r.eps_growth != null && r.eps_growth > 0.25) _growEPS = 2;
+      else if (r.eps_growth != null && r.eps_growth > 0.10) _growEPS = 1;
+      _growRev = (r.rev_growth != null && r.rev_growth > 0.10) ? 1 : 0;
+    } else {
+      if      (r.ret_20d != null && r.ret_20d > 10) _growEPS = 2;
+      else if (r.ret_20d != null && r.ret_20d >  5) _growEPS = 1;
+      _growRev = (r.ret_5d != null && r.ret_5d > 2) ? 1 : 0;
+    }
+    const _growScore = _growEPS + _growRev;
+
+    // ════════════════════════════════════════════════════
+    // 🔵 價值 Value (0-3)
+    //    US：FwdPE/PE(0-2) + 毛利率>40%加成(1)
+    //    TW：52週位階(1) + 健康籌碼 margin_chg<0(1) + 進場後獲利(1)
+    // ════════════════════════════════════════════════════
+    let _valPE = 0, _valBonus = 0;
+    if (!isTW) {
+      const _pe = r.fwd_pe ?? r.pe;
+      if      (_pe != null && _pe > 0 && _pe < 15) _valPE = 2;
+      else if (_pe != null && _pe > 0 && _pe < 25) _valPE = 1;
+      _valBonus = (r.gross_margin != null && r.gross_margin > 0.4) ? 1 : 0;
+    } else {
+      const _near52 = r.pct_from_52w != null && r.pct_from_52w > -15 ? 1 : 0;
+      const _chipOK = (r.margin_chg != null && r.margin_chg < 0) ? 1 : 0;
+      const _pnlOK  = (r.pnl_pct   != null && r.pnl_pct   > 0)  ? 1 : 0;
+      _valPE    = _near52;
+      _valBonus = _chipOK + _pnlOK;
+    }
+    const _valScore = Math.min(3, _valPE + _valBonus);
+
+    // ── 綜合得分 max 12 ──
+    const _compositeScore = _momScore + _qualScore + _growScore + _valScore;
+
+    // ── ST 狀態（L2 顯示用）──
+    const _stScore = r.all_green ? 2 : (r.st1===1||r.st2===1||r.st3===1) ? 1 : 0;
+
+    // ── 四層判斷 ────────────────────────────────────────
     const _layer1Pass = true;
-
     // L2 趨勢確認：ST全綠 AND MACD週線正
     const _layer2Pass = r.all_green === true && _macdScore > 0;
-
-    // L3 多因子打分：綜合得分 ≥ 3
-    const _layer3Pass = _compositeScore >= 3;
-
+    // L3 多因子：總分 ≥ 6/12（50%）
+    const _layer3Pass = _compositeScore >= 6;
     // L4 風控：無止損 AND ATR%<6 AND RSI<80
     const _layer4Pass = !r.stop_loss &&
                         (r.atr_pct == null || r.atr_pct < 6) &&
                         (r.rsi     == null || r.rsi     < 80);
 
-    // 連續通過層數（漏斗邏輯：必須依序累積）
     const _layersPassed = _layer4Pass && _layer3Pass && _layer2Pass ? 4
                         : _layer3Pass && _layer2Pass               ? 3
                         : _layer2Pass                               ? 2
@@ -1278,7 +1329,7 @@ function buildFactorPanel() {
 
     return { ...r,
       _stScore, _macdScore, _macdProxy,
-      _adxScore, _rsiScore, _momScore,
+      _momScore, _qualScore, _growScore, _valScore,
       _compositeScore,
       _layer1Pass, _layer2Pass, _layer3Pass, _layer4Pass,
       _layersPassed,
@@ -1313,9 +1364,9 @@ function renderFunnel() {
     layer('fl-l2','#00d4aa','📈','Layer 2 · 趨勢確認','ST全綠 + MACD週線正',
           l2cnt, p(l2cnt,total), '#00d4aa',
           '<span>· SuperTrend 三線全綠</span><span>· 週線 MACD 柱體 > 0</span>') +
-    layer('fl-l3','#f5c842','⚖️','Layer 3 · 多因子打分','綜合得分 ≥ 3 / 6',
+    layer('fl-l3','#f5c842','⚖️','Layer 3 · 多因子打分','價值+成長+品質+動能 ≥ 6/12',
           l3cnt, p(l3cnt,l2cnt), '#f5c842',
-          '<span>· ST + MACD週線</span><span>· ADX > 25 趨勢強</span><span>· RSI 甜蜜區 50–70</span><span>· 超額報酬 > 0</span>') +
+          '<span>🔵 價值：FwdPE / PE</span><span>🟢 成長：EPS + 營收成長</span><span>🟡 品質：毛利率 + ADX</span><span>🟣 動能：RS + MACD + RSI</span>') +
     layer('fl-l4','#a78bfa','🛡️','Layer 4 · 風控','最終候選清單',
           l4cnt, p(l4cnt,l3cnt), '#a78bfa',
           '<span>· 無止損警報</span><span>· ATR% &lt; 6%</span><span>· RSI &lt; 80（非超買）</span>');
@@ -1353,21 +1404,18 @@ function renderFactorTable(list) {
       ${dot('ld-2', r._layer2Pass)}
       ${dot('ld-3', r._layer3Pass)}
       ${dot('ld-4', r._layer4Pass)}
-      <span style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-left:4px">L${r._layersPassed}</span>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-left:4px">L${r._layersPassed}</span>
     </div>`;
   };
 
-  const stCell = r => {
-    const clr = r._stScore===2 ? 'var(--green)' : r._stScore===1 ? 'var(--yellow)' : 'var(--red)';
-    const lbl = r._stScore===2 ? '🟢全綠' : r._stScore===1 ? '🟡部分' : '🔴全紅';
-    return `<span style="color:${clr};font-size:12px">${lbl}</span>`;
-  };
-
-  const macdCell = r => {
-    const clr = r._macdScore>0 ? 'var(--green)' : r._macdScore<0 ? 'var(--red)' : 'var(--muted)';
-    const lbl = r._macdScore>0 ? '📈正' : r._macdScore<0 ? '📉負' : '—';
-    const proxy = r._macdProxy ? `<span style="font-size:9px;opacity:.5;display:block">5d代理</span>` : '';
-    return `<span style="color:${clr}">${lbl}</span>${proxy}`;
+  // 維度欄：分數 + 迷你進度條 + 指標說明
+  const dimCell = (score, max, color, lines) => {
+    const pctW = Math.round(score/max*100);
+    const clr  = score >= max*0.67 ? color : score >= max*0.34 ? '#888' : 'var(--muted)';
+    const bar  = `<div style="height:3px;border-radius:2px;background:var(--border);margin-top:3px;width:48px">
+      <div style="height:100%;border-radius:2px;background:${clr};width:${pctW}%"></div></div>`;
+    const detail = lines.map(l=>`<div style="font-size:11px;color:var(--muted);line-height:1.4">${l}</div>`).join('');
+    return `<td><span style="font-family:var(--mono);font-weight:700;color:${clr}">${score}/${max}</span>${bar}${detail}</td>`;
   };
 
   const riskCell = r => {
@@ -1379,13 +1427,22 @@ function renderFactorTable(list) {
     return `<span class="risk-warn">✗ ${issues.join('・')}</span>`;
   };
 
-  const scoreCell = n => {
-    const max = 6;
-    const filled = Math.round(n);
-    const clr = filled>=5 ? 'var(--green)' : filled>=3 ? 'var(--yellow)' : 'var(--muted)';
-    const bar = `<div style="height:4px;border-radius:2px;background:var(--border);margin-top:3px;width:60px">
-      <div style="height:100%;border-radius:2px;background:${clr};width:${filled/max*100}%"></div></div>`;
-    return `<span style="font-family:var(--mono);font-weight:700;color:${clr}">${n}/${max}</span>${bar}`;
+  const scoreCell = r => {
+    const n = r._compositeScore, max = 12;
+    const clr = n>=9 ? 'var(--green)' : n>=6 ? 'var(--yellow)' : 'var(--muted)';
+    const bar = `<div style="height:4px;border-radius:2px;background:var(--border);margin-top:3px;width:64px">
+      <div style="height:100%;border-radius:2px;background:${clr};width:${n/max*100}%"></div></div>`;
+    // mini 4-dim dots
+    const dims = [
+      {s:r._valScore, c:'#4a9eff'},
+      {s:r._growScore, c:'#00d4aa'},
+      {s:r._qualScore, c:'#f5c842'},
+      {s:r._momScore, c:'#a78bfa'},
+    ];
+    const dots = `<div style="display:flex;gap:3px;margin-top:4px">${
+      dims.map(d=>`<span style="font-family:var(--mono);font-size:10px;color:${d.s>0?d.c:'var(--border)'}">${d.s}</span>`).join('<span style="color:var(--border)">·</span>')
+    }</div>`;
+    return `<td><span style="font-family:var(--mono);font-weight:700;color:${clr}">${n}/${max}</span>${bar}${dots}</td>`;
   };
 
   const mktBadge = r => r.market==='US' ? '<span class="badge badge-us">US</span>'
@@ -1393,28 +1450,48 @@ function renderFactorTable(list) {
 
   const rowCls = r => r._layersPassed===4 ? 'row-l4' : r._layersPassed===3 ? 'row-l3' : '';
 
-  document.getElementById('factorTbody').innerHTML = list.map(r => `
-    <tr class="${rowCls(r)}">
+  const isTW = r => r.market==='TW'||r.market==='TWSE'||r.market==='TPEX';
+
+  document.getElementById('factorTbody').innerHTML = list.map(r => {
+    // 動能 detail
+    const momLines = [
+      `RS ${pct(r.rs_20d)}`,
+      `MACD ${r._macdScore?'▲正':'▽負'}${r._macdProxy?' (代理)':''}`,
+      `RSI ${r.rsi!=null?r.rsi.toFixed(0):'—'}`,
+    ];
+    // 品質 detail
+    const qualLines = isTW(r)
+      ? [`法人${r.inst_buy?'買超':r.inst_sell?'賣超':'中立'}`, `ADX ${r.adx!=null?r.adx.toFixed(0):'—'}`]
+      : [`毛利率 ${r.gross_margin!=null?(r.gross_margin*100).toFixed(0)+'%':'—'}`, `ADX ${r.adx!=null?r.adx.toFixed(0):'—'}`];
+    // 成長 detail
+    const growLines = isTW(r)
+      ? [`20d ${pct(r.ret_20d)}`, `5d ${pct(r.ret_5d)}`]
+      : [`EPS成長 ${r.eps_growth!=null?(r.eps_growth*100).toFixed(0)+'%':'—'}`,
+         `營收成長 ${r.rev_growth!=null?(r.rev_growth*100).toFixed(0)+'%':'—'}`];
+    // 價值 detail
+    const valLines = isTW(r)
+      ? [`52w位階 ${r.pct_from_52w!=null?r.pct_from_52w.toFixed(0)+'%':'—'}`,
+         `融資${r.margin_chg!=null&&r.margin_chg<0?'↓健康':'—'}`]
+      : [`FwdPE ${r.fwd_pe!=null?r.fwd_pe.toFixed(1):'—'}`,
+         `PE ${r.pe!=null?r.pe.toFixed(1):'—'}`];
+
+    return `<tr class="${rowCls(r)}">
       <td><span style="font-family:var(--mono);font-weight:700">${r.ticker}</span></td>
-      <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${r.name||'—'}</td>
+      <td style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)">${r.name||'—'}</td>
       <td style="font-family:var(--mono)">
         ${r.price!=null ? r.price.toFixed(2) : '—'}
-        <div style="font-size:10px;color:${(r.change_pct||0)>=0?'var(--green)':'var(--red)'}">${pct(r.change_pct)}</div>
+        <div style="font-size:11px;color:${(r.change_pct||0)>=0?'var(--green)':'var(--red)'}">${pct(r.change_pct)}</div>
       </td>
       <td>${layerDots(r)}</td>
-      <td>${stCell(r)}</td>
-      <td>${macdCell(r)}</td>
-      <td style="font-family:var(--mono);font-size:11px">
-        <span style="color:${r._adxScore?'var(--green)':'var(--muted)'}">${r.adx!=null?r.adx.toFixed(0):'—'}</span>
-        <span style="color:var(--muted)"> / </span>
-        <span style="color:${r._rsiScore?'var(--green)':r.rsi>70?'var(--red)':'var(--muted)'}">${r.rsi!=null?r.rsi.toFixed(0):'—'}</span>
-      </td>
-      <td style="font-family:var(--mono);color:${(r.rs_20d||0)>=0?'var(--green)':'var(--red)'}">${pct(r.rs_20d)}</td>
+      ${dimCell(r._momScore, 3, '#a78bfa', momLines)}
+      ${dimCell(r._qualScore, 3, '#f5c842', qualLines)}
+      ${dimCell(r._growScore, 3, '#00d4aa', growLines)}
+      ${dimCell(r._valScore, 3, '#4a9eff', valLines)}
       <td>${riskCell(r)}</td>
-      <td>${scoreCell(r._compositeScore)}</td>
+      ${scoreCell(r)}
       <td>${mktBadge(r)}</td>
-    </tr>
-  `).join('') || `<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:32px">無符合條件的股票</td></tr>`;
+    </tr>`;
+  }).join('') || `<tr><td colspan="11" style="text-align:center;color:var(--muted);padding:32px">無符合條件的股票</td></tr>`;
 
   const layerCnts = [1,2,3,4].map(n => _factorData.filter(r=>r._layersPassed===n).length);
   document.getElementById('factorFootInfo').textContent =
