@@ -4,6 +4,8 @@ report_generator.py ── HTML 儀表板生成與 Gemini AI 分析模組
 
 import json
 import os
+import random
+import time
 import requests
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,25 +37,34 @@ def fetch_us_fundamentals_bulk(tickers: list) -> dict:
         return None
 
     def _fetch_one(ticker):
-        try:
-            info = yf.Ticker(ticker).info
-            return ticker, {k: _pick(info, ks) for k, ks in _KEY_SETS.items()}
-        except Exception:
-            return ticker, {k: None for k in _KEY_SETS}
+        for attempt in range(3):
+            try:
+                info = yf.Ticker(ticker).info
+                # 確認 info 有實質內容（空 dict 或只有 maxAge 代表被 rate limit）
+                if not info or len(info) < 10:
+                    raise ValueError(f'Thin info dict ({len(info)} keys)')
+                return ticker, {k: _pick(info, ks) for k, ks in _KEY_SETS.items()}
+            except Exception as e:
+                if attempt < 2:
+                    wait = 2 ** attempt + random.uniform(0.5, 1.5)
+                    print(f'  [Fundamentals] {ticker} retry {attempt+1}/2 in {wait:.1f}s: {e}')
+                    time.sleep(wait)
+        return ticker, {k: None for k in _KEY_SETS}
 
     result: dict = {}
     if not tickers:
         return result
 
     print(f'  [Fundamentals] Fetching {len(tickers)} US tickers...')
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    # max_workers 降到 2，避免 Yahoo Finance rate limit（GitHub Actions IP 限制較嚴）
+    with ThreadPoolExecutor(max_workers=2) as ex:
         futures = {ex.submit(_fetch_one, t): t for t in tickers}
         done = 0
         for f in as_completed(futures):
             ticker, data = f.result()
             result[ticker] = data
             done += 1
-            if done % 30 == 0:
+            if done % 10 == 0:
                 print(f'  [Fundamentals] {done}/{len(tickers)}')
 
     found = sum(1 for v in result.values() if v.get('pe') is not None)
@@ -82,9 +93,28 @@ def _fetch_us_fundamentals(tickers: list) -> dict:
     def num(v):
         return f'{v:.1f}' if v is not None else '—'
 
+    def _get_info_with_retry(ticker, retries=3):
+        for attempt in range(retries):
+            try:
+                info = yf.Ticker(ticker).info
+                if info and len(info) >= 10:
+                    return info
+                raise ValueError(f'Thin info dict ({len(info)} keys)')
+            except Exception as e:
+                if attempt < retries - 1:
+                    wait = 2 ** attempt + random.uniform(0.5, 1.5)
+                    print(f'  [Fundamentals] {ticker} retry {attempt+1}/{retries-1} in {wait:.1f}s: {e}')
+                    time.sleep(wait)
+        return {}
+
     for t in tickers[:20]:
         try:
-            info = yf.Ticker(t).info
+            info = _get_info_with_retry(t)
+            if not info:
+                print(f'  [WARN] Fundamentals {t}: could not fetch info after retries')
+                result[t] = {}
+                continue
+
             if t == tickers[0]:
                 filled = {k: v for k, v in info.items()
                           if v is not None and k in
@@ -125,6 +155,8 @@ def _fetch_us_fundamentals(tickers: list) -> dict:
                 'rev_growth':   pct(rg_val)  if rg_val and abs(rg_val) < 100 else '—',
                 'gross_margin': pct(gm_val)  if gm_val else '—',
             }
+            # 每支之間稍微等一下，避免連續請求被封
+            time.sleep(random.uniform(0.3, 0.8))
         except Exception as e:
             print(f'  [WARN] Fundamentals {t}: {e}')
             result[t] = {}
