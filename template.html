@@ -534,6 +534,50 @@ tr.row-l3 td{background:rgba(245,200,66,.03)}
 .news-btn.nb-neg{color:var(--red);opacity:.8}
 .news-btn.nb-mix{color:var(--yellow);opacity:.8}
 
+/* ── Insider Button ── */
+.insider-btn{
+  background:none;border:none;padding:2px 4px;cursor:pointer;
+  font-size:11px;line-height:1;opacity:.65;transition:opacity .15s;
+  flex-shrink:0;font-family:var(--mono);letter-spacing:-.5px;
+}
+.insider-btn:hover{opacity:1}
+.insider-btn.ib-heavy{color:#ff4d4d;opacity:.9}
+.insider-btn.ib-sell{color:var(--red);opacity:.8}
+.insider-btn.ib-buy{color:var(--green);opacity:.8}
+.insider-btn.ib-neutral{color:var(--muted);opacity:.6}
+
+/* ── Insider Modal ── */
+.insider-overlay{
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
+  z-index:1100;align-items:center;justify-content:center;
+}
+.insider-overlay.open{display:flex}
+.insider-modal{
+  background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+  width:520px;max-width:95vw;max-height:80vh;display:flex;flex-direction:column;
+  box-shadow:0 20px 60px rgba(0,0,0,.5);
+}
+.insider-modal-hdr{
+  display:flex;align-items:center;gap:8px;padding:14px 16px 10px;
+  border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.insider-modal-body{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.insider-item{
+  background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:8px 10px;
+}
+.insider-item:hover{border-color:var(--blue);background:var(--bg4)}
+.insider-name{font-size:12px;color:var(--text);font-weight:600;margin-bottom:2px}
+.insider-pos{font-size:10px;color:var(--muted);margin-bottom:4px}
+.insider-meta{font-family:var(--mono);font-size:11px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.insider-tag-sell{color:#ff4d4d;font-weight:700}
+.insider-tag-buy{color:var(--green);font-weight:700}
+.insider-tag-other{color:var(--muted)}
+.insider-summary{
+  background:var(--bg3);border:1px solid var(--border);border-radius:6px;
+  padding:8px 12px;margin-bottom:4px;font-size:11px;font-family:var(--mono);
+  display:flex;gap:16px;flex-wrap:wrap;
+}
+
 /* ══════════════════════════════════════
    STRIPE DARK ENHANCEMENT LAYER
    ══════════════════════════════════════ */
@@ -851,6 +895,19 @@ body{
       <button class="tv-close" onclick="closeNews()" style="margin-left:auto">✕</button>
     </div>
     <div id="news-body" class="news-modal-body"></div>
+  </div>
+</div>
+
+<!-- ── Insider Modal ── -->
+<div id="insider-overlay" class="insider-overlay" onclick="handleInsiderOverlayClick(event)">
+  <div class="insider-modal">
+    <div class="insider-modal-hdr">
+      <span style="font-size:14px">🏦</span>
+      <span id="insider-ticker" style="font-family:var(--mono);font-weight:700;font-size:14px;color:var(--yellow)"></span>
+      <span style="font-size:11px;color:var(--muted)">內部人士交易（近90天）</span>
+      <button class="tv-close" onclick="closeInsider()" style="margin-left:auto">✕</button>
+    </div>
+    <div id="insider-body" class="insider-modal-body"></div>
   </div>
 </div>
 
@@ -1212,8 +1269,18 @@ function render() {
       const sentTip = `正面${pos} 負面${neg} 中性${r.news.length - pos - neg}`;
       newsBtn = `<button class="news-btn ${sentCls}" onclick="openNews('${r.ticker}',event)" title="新聞情緒：${sentTip}">📰${pos>0?'<span style=\'font-size:9px\'>+'+pos+'</span>':''}${neg>0?'<span style=\'font-size:9px;color:var(--red)\'>-'+neg+'</span>':''}</button>`;
     }
+    let insiderBtn = '';
+    if (r.insider && r.market === 'US') {
+      const sig = r.insider.signal;
+      const ibCls = sig === 'heavy_sell' ? 'ib-heavy' : sig === 'selling' ? 'ib-sell' : sig === 'buying' ? 'ib-buy' : 'ib-neutral';
+      const icon  = sig === 'heavy_sell' ? '🔴' : sig === 'selling' ? '🟠' : sig === 'buying' ? '🟢' : '⚪';
+      const tip   = sig === 'heavy_sell' ? `大量出售 $${r.insider.sell_value_m.toFixed(1)}M (${r.insider.sells}筆)` :
+                    sig === 'selling'    ? `賣出 ${r.insider.sells} 筆 $${r.insider.sell_value_m.toFixed(1)}M` :
+                    sig === 'buying'     ? `買入 ${r.insider.buys} 筆 $${r.insider.buy_value_m.toFixed(1)}M` : '無明顯動向';
+      insiderBtn = `<button class="insider-btn ${ibCls}" onclick="openInsider('${r.ticker}',event)" title="內部人士：${tip}">${icon}<span style='font-size:9px'>${sig==='heavy_sell'?'賣!':sig==='selling'?'賣':sig==='buying'?'買':''}</span></button>`;
+    }
     return `<tr class="${rowCls}">
-      <td><div class="tick-cell"><div class="tick-row">${mktBadge}<button class="tick-btn" onclick="openChart('${r.ticker}','${r.market||'US'}','${(r.name||'').replace(/'/g,'`')}',event)">${r.ticker}</button>${newsBtn}</div><div class="spark">${sparkSVG(r.close_20d)}</div></div></td>
+      <td><div class="tick-cell"><div class="tick-row">${mktBadge}<button class="tick-btn" onclick="openChart('${r.ticker}','${r.market||'US'}','${(r.name||'').replace(/'/g,'`')}',event)">${r.ticker}</button>${newsBtn}${insiderBtn}</div><div class="spark">${sparkSVG(r.close_20d)}</div></div></td>
       <td><span class="nm" title="${r.name||''}">${(r.name||r.ticker).substring(0,20)}</span></td>
       <td>
         <span class="price">${fmtPrice(r)}</span>
@@ -1924,6 +1991,61 @@ function closeNews() {
 function handleNewsOverlayClick(e) {
   if (e.target === document.getElementById('news-overlay')) closeNews();
 }
+
+// ── Insider Modal ────────────────────────────────────────────
+function openInsider(ticker, e) {
+  if (e) e.stopPropagation();
+  const r = DATA_MAP[ticker];
+  if (!r || !r.insider) return;
+  const ins = r.insider;
+
+  document.getElementById('insider-ticker').textContent = ticker;
+
+  const sigLabel = ins.signal === 'heavy_sell' ? '🔴 大量出售' :
+                   ins.signal === 'selling'     ? '🟠 賣出為主' :
+                   ins.signal === 'buying'       ? '🟢 買入為主' : '⚪ 無明顯動向';
+
+  const summaryHtml = `<div class="insider-summary">
+    <span>${sigLabel}</span>
+    <span style="color:var(--red)">賣出 ${ins.sells} 筆｜$${ins.sell_value_m.toFixed(1)}M</span>
+    <span style="color:var(--green)">買入 ${ins.buys} 筆｜$${ins.buy_value_m.toFixed(1)}M</span>
+  </div>`;
+
+  const itemsHtml = (ins.recent || []).map(t => {
+    const typeCls  = t.type === 'sell' ? 'insider-tag-sell' : t.type === 'buy' ? 'insider-tag-buy' : 'insider-tag-other';
+    const typeText = t.type === 'sell' ? '▼ 賣出' : t.type === 'buy' ? '▲ 買入' : '其他';
+    const safeIns  = (t.insider  || '').replace(/</g,'&lt;');
+    const safePos  = (t.position || '').replace(/</g,'&lt;');
+    const shares   = t.shares ? t.shares.toLocaleString() + ' 股' : '';
+    const val      = t.value_m ? `$${t.value_m.toFixed(2)}M` : '';
+    return `<div class="insider-item">
+      <div class="insider-name">${safeIns}</div>
+      <div class="insider-pos">${safePos}</div>
+      <div class="insider-meta">
+        <span class="${typeCls}">${typeText}</span>
+        <span style="color:var(--muted)">${t.date}</span>
+        ${shares ? `<span>${shares}</span>` : ''}
+        ${val    ? `<span style="font-weight:600">${val}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+
+  document.getElementById('insider-body').innerHTML =
+    summaryHtml + (itemsHtml || '<div style="color:var(--muted);padding:12px">近90天無交易記錄</div>');
+
+  document.getElementById('insider-overlay').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeInsider() {
+  document.getElementById('insider-overlay').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+function handleInsiderOverlayClick(e) {
+  if (e.target === document.getElementById('insider-overlay')) closeInsider();
+}
+
 if (!AI_RAW || AI_RAW === '') {
   const btn = document.getElementById('ai-open-btn');
   if (btn) { btn.style.opacity = '0.45'; btn.title = '尚無 AI 分析（請設定 GEMINI_API_KEY）'; }

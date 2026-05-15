@@ -38,6 +38,7 @@ from ticker_fetcher   import get_tickers_with_meta
 from data_handler     import bulk_download_all, download_benchmarks
 from chip_data        import fetch_chip_institutional, fetch_chip_margin
 from news_fetcher     import fetch_news_for_tickers
+from insider_fetcher  import fetch_insider_for_tickers
 from report_generator import generate_html, fetch_us_fundamentals_bulk
 
 TW_TZ = timezone(timedelta(hours=8))
@@ -468,8 +469,30 @@ def main():
     for r in all_results:
         r['news'] = news_map.get(r['ticker'], [])
 
-    # Step 3e: 美股基本面（全綠 + 今日新轉綠）
-    print('\n[3e] Fetching US fundamentals (value/growth/quality)...')
+    # Step 3e: 美股內部人士交易（全綠 + 今日新轉綠）
+    print('\n[3e] Fetching insider transactions for all-green US tickers...')
+    insider_candidates = [
+        r['ticker'] for r in all_results
+        if r.get('market') == 'US'
+        and (r.get('all_green') or r.get('today_change') == 'to_green')
+    ]
+    if insider_candidates:
+        insider_map = fetch_insider_for_tickers(insider_candidates)
+        merged_insider = 0
+        for r in all_results:
+            if r.get('market') == 'US' and r['ticker'] in insider_map:
+                r['insider'] = insider_map[r['ticker']]
+                merged_insider += 1
+            elif 'insider' not in r:
+                r['insider'] = None
+        print(f'  [Insider] Merged into {merged_insider} US stocks')
+    else:
+        for r in all_results:
+            if 'insider' not in r:
+                r['insider'] = None
+
+    # Step 3f: 美股基本面（全綠 + 今日新轉綠）
+    print('\n[3f] Fetching US fundamentals (value/growth/quality)...')
     fund_candidates = [
         r['ticker'] for r in all_results
         if r.get('market') == 'US'
